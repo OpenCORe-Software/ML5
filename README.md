@@ -3,7 +3,6 @@
 <p align="center"><img src="ML5.png" alt="ML5" width="480"></p>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Crates.io](https://img.shields.io/crates/v/ml5.svg)](https://crates.io/crates/ml5)
 
 Local inference with a Rust CLI, a daemon, and native HTTP endpoints.
 OpenAI-compatible API on `http://127.0.0.1:11435`.
