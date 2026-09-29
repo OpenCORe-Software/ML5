@@ -1,0 +1,28 @@
+[package]
+name = "ml5"
+description = "CORe ML5 CLI: manage models and talk to a running ml5d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "ml5"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+futures.workspace = true
+comfy-table = "7"
+indicatif = "0.17"
+dirs.workspace = true
+zip = "8.6.0"
+sha2 = "0.10"
+hex = "0.4"

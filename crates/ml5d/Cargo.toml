@@ -1,0 +1,33 @@
+[package]
+name = "ml5d"
+description = "CORe ML5 daemon: API server hosting native + OpenAI-compatible endpoints"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "ml5d"
+path = "src/main.rs"
+
+[dependencies]
+ml5-core = { path = "../ml5-core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+axum.workspace = true
+clap.workspace = true
+futures.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+bytes.workspace = true
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+indicatif = "0.18.6"
+tracing-appender = "0.2.5"
+winapi = { version = "0.3.9", features = ["processthreadsapi", "winbase", "handleapi"] }
+async-stream = "0.3.6"
