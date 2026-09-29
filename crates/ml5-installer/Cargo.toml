@@ -14,10 +14,6 @@ name = "ml5-installer-cuda"
 path = "src/bin/cuda.rs"
 
 [[bin]]
-name = "ml5-installer-legacy-cuda"
-path = "src/bin/legacy_cuda.rs"
-
-[[bin]]
 name = "ml5-installer-vulkan"
 path = "src/bin/vulkan.rs"
 

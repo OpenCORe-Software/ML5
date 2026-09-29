@@ -7,12 +7,10 @@ use std::path::{Path, PathBuf};
 const UPDATE_SERVER: &str = "https://ml5-updates.opencore.one";
 const GITHUB_RELEASE: &str = "https://github.com/OpenCORe-Software/ML5/releases/latest/download";
 const LLAMA_RELEASE: &str = "b10687";
-const LLAMA_LEGACY_CUDA_RELEASE: &str = "b3617";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Backend {
     Cuda,
-    LegacyCuda,
     Vulkan,
     Cpu,
 }
@@ -21,7 +19,6 @@ impl Backend {
     pub fn label(&self) -> &'static str {
         match self {
             Backend::Cuda => "CUDA",
-            Backend::LegacyCuda => "Legacy-CUDA (GTX 10-series)",
             Backend::Vulkan => "Vulkan",
             Backend::Cpu => "CPU only",
         }
@@ -30,7 +27,6 @@ impl Backend {
     pub fn marker(&self) -> &'static str {
         match self {
             Backend::Cuda => "cuda",
-            Backend::LegacyCuda => "legacy-cuda",
             Backend::Vulkan => "vulkan",
             Backend::Cpu => "cpu",
         }
@@ -140,9 +136,6 @@ fn pick_backend(gpus: &[GpuInfo]) -> Backend {
                 if major >= 7 {
                     return Backend::Cuda;
                 }
-                if major == 6 {
-                    return Backend::LegacyCuda;
-                }
             }
             return Backend::Cuda;
         }
@@ -188,7 +181,6 @@ fn read_marker() -> Option<Backend> {
     let s = std::fs::read_to_string(marker_path()).ok()?;
     match s.trim() {
         "cuda" => Some(Backend::Cuda),
-        "legacy-cuda" => Some(Backend::LegacyCuda),
         "vulkan" => Some(Backend::Vulkan),
         "cpu" => Some(Backend::Cpu),
         _ => None,
@@ -245,18 +237,16 @@ fn ask(prompt: &str, options: &[&str], default: usize, non_interactive: bool) ->
 
 #[allow(dead_code)]
 fn ask_backend(default: Backend, non_interactive: bool) -> Result<Backend> {
-    let options = ["CUDA", "Legacy-CUDA (GTX 10-series)", "Vulkan", "CPU only"];
+    let options = ["CUDA", "Vulkan", "CPU only"];
     let default_idx = match default {
         Backend::Cuda => 0,
-        Backend::LegacyCuda => 1,
-        Backend::Vulkan => 2,
-        Backend::Cpu => 3,
+        Backend::Vulkan => 1,
+        Backend::Cpu => 2,
     };
     let idx = ask("Choose backend:", &options, default_idx, non_interactive)?;
     Ok(match idx {
         0 => Backend::Cuda,
-        1 => Backend::LegacyCuda,
-        2 => Backend::Vulkan,
+        1 => Backend::Vulkan,
         _ => Backend::Cpu,
     })
 }
@@ -268,13 +258,6 @@ fn llama_backend_url(b: Backend) -> (&'static str, String) {
             format!(
                 "https://github.com/ggml-org/llama.cpp/releases/download/{}/llama-{}-bin-win-cuda-12.4-x64.zip",
                 LLAMA_RELEASE, LLAMA_RELEASE
-            ),
-        ),
-        Backend::LegacyCuda => (
-            LLAMA_LEGACY_CUDA_RELEASE,
-            format!(
-                "https://github.com/ggml-org/llama.cpp/releases/download/{}/llama-{}-bin-win-cuda-cu11.7.1-x64.zip",
-                LLAMA_LEGACY_CUDA_RELEASE, LLAMA_LEGACY_CUDA_RELEASE
             ),
         ),
         Backend::Vulkan => (
@@ -295,13 +278,8 @@ fn llama_backend_url(b: Backend) -> (&'static str, String) {
 }
 
 fn llama_extra_urls(b: Backend) -> Vec<String> {
-    match b {
-        Backend::LegacyCuda => vec![format!(
-            "https://github.com/ggml-org/llama.cpp/releases/download/{}/cudart-llama-bin-win-cu11.7.1-x64.zip",
-            LLAMA_LEGACY_CUDA_RELEASE
-        )],
-        _ => Vec::new(),
-    }
+    let _ = b;
+    Vec::new()
 }
 
 async fn download_with_progress(client: &reqwest::Client, url: &str, label: &str) -> Result<Vec<u8>> {
@@ -509,6 +487,13 @@ async fn install(backend: Backend, yes: bool) -> Result<()> {
         println!("Downloading runtime support archive...");
         let data = download_with_progress(&client, &extra, "runtime").await?;
         extract_backend_zip(&data, &backends_dir())?;
+    }
+
+    for core in ["llama.dll", "ggml.dll", "ggml-base.dll", "libomp.dll"] {
+        let src = backends_dir().join(core);
+        if src.exists() {
+            let _ = std::fs::copy(&src, bindir.join(core));
+        }
     }
 
     write_marker(backend)?;
