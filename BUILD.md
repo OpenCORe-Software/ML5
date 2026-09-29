@@ -43,3 +43,8 @@ Copy-Item target\release\ml5d.exe "$env:LOCALAPPDATA\Programs\ML5\bin\ml5d.exe" 
   ```powershell
   Stop-Process -Name ml5d -Force
   ```
+- **CUDA on Pascal (GTX 10-series)** cannot be built with current toolchains. The last
+  Pascal-capable CUDA (11.7) uses GCC-style headers (`include_next`) that MSVC's front-end
+  rejects, and CUDA 12.4+ dropped Pascal entirely. There is no working local build path for
+  legacy CUDA on a modern Windows toolchain. Pascal GPUs use the **Vulkan** backend instead,
+  which provides full GPU offload.

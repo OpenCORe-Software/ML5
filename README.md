@@ -194,6 +194,14 @@ ml5d --gpu-layers 32  # Specific layer count
 
 **Note**: GPU support requires compatible llama.cpp backend libraries and a build with the `gpu` feature enabled.
 
+### Backend compatibility
+
+- **CUDA** — NVIDIA GPUs with compute capability 7.5+ (RTX 20-series and newer).
+- **Vulkan** — the path for older NVIDIA cards. Pascal-era GPUs (GTX 10-series, e.g. GTX 1060/1080) can't use current CUDA builds, since llama.cpp upstream and NVIDIA dropped Pascal after CUDA 11.7. Vulkan gives full GPU offload on those cards.
+- **CPU** — no GPU; runs on the processor.
+
+Pick the installer matching your card. Older-NVIDIA users should use `ml5-installer-vulkan.exe`.
+
 ## Development
 
 ### Running Tests
