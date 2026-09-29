@@ -103,6 +103,7 @@ pub async fn responses(
         },
         overrides: RequestOverrides::default(),
         stream: body.stream,
+        cache: false,
     };
 
     let mut stream = state.engine.chat(req).await.map_err(err_response)?;

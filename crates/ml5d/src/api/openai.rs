@@ -126,6 +126,7 @@ pub async fn chat_completions(
         },
         overrides: RequestOverrides::default(),
         stream: body.stream,
+        cache: false,
     };
 
     let mut stream = state.engine.chat(req).await.map_err(err_response)?;
@@ -254,6 +255,7 @@ pub async fn completions(
         },
         overrides: RequestOverrides::default(),
         stream: body.stream,
+        cache: false,
     };
 
     let mut stream = state.engine.generate(req).await.map_err(err_response)?;

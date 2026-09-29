@@ -1,6 +1,13 @@
 use crate::backend::Backend;
 use crate::config::Config;
 use crate::error::{Ml5Error, Result};
+
+fn now_millis() -> u64 {
+    use std::sync::OnceLock;
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    let epoch = EPOCH.get_or_init(Instant::now);
+    epoch.elapsed().as_millis() as u64
+}
 use crate::model::ModelInfo;
 use crate::types::*;
 use futures::Stream;
@@ -13,7 +20,7 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 pub struct LoadedModel {
     pub info: ModelInfo,
     pub backend: Arc<dyn Backend>,
-    pub last_used: std::sync::Mutex<Instant>,
+    pub last_used: std::sync::atomic::AtomicU64,
     pub gpu_layers: i32,
 }
 
@@ -300,10 +307,10 @@ impl Engine {
         let mut stream = model.backend.chat(req).await?;
         Ok(Box::pin(async_stream::stream! {
             while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
-                *model.last_used.lock().unwrap() = Instant::now();
+                model.last_used.store(now_millis(), std::sync::atomic::Ordering::Relaxed);
                 yield chunk;
             }
-            *model.last_used.lock().unwrap() = Instant::now();
+            model.last_used.store(now_millis(), std::sync::atomic::Ordering::Relaxed);
         }))
     }
 
@@ -320,10 +327,10 @@ impl Engine {
         let mut stream = model.backend.generate(req).await?;
         Ok(Box::pin(async_stream::stream! {
             while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
-                *model.last_used.lock().unwrap() = Instant::now();
+                model.last_used.store(now_millis(), std::sync::atomic::Ordering::Relaxed);
                 yield chunk;
             }
-            *model.last_used.lock().unwrap() = Instant::now();
+            model.last_used.store(now_millis(), std::sync::atomic::Ordering::Relaxed);
         }))
     }
 
@@ -346,14 +353,14 @@ impl Engine {
             if overrides.n_gpu_layers.is_some_and(|g| g != m.gpu_layers) {
                 return Err(Ml5Error::InvalidRequest(format!("GPU layers differ from the loaded model. Run `ml5 unload {}` before changing --gpu-layers.", info.name)));
             }
-            *m.last_used.lock().unwrap() = Instant::now();
+            m.last_used.store(now_millis(), std::sync::atomic::Ordering::Relaxed);
             return Ok(m.clone());
         }
         if loaded.len() >= self.config.max_loaded_models {
             if let Some(evict_name) = loaded
                 .iter()
                 .filter(|(_, m)| Arc::strong_count(m) == 1)
-                .min_by_key(|(_, m)| *m.last_used.lock().unwrap())
+                .min_by_key(|(_, m)| m.last_used.load(std::sync::atomic::Ordering::Relaxed))
                 .map(|(n, _)| n.clone())
             {
                 tracing::info!(model = %evict_name, "evicting LRU model");
@@ -373,10 +380,18 @@ impl Engine {
             params.n_gpu_layers = g;
         }
 
+        let n_parallel = if self.config.parallel {
+            self.config.n_parallel.max(1)
+        } else {
+            1
+        };
         let backend: Arc<dyn crate::backend::Backend> = match info.model_type {
             crate::model::ModelType::Gguf => Arc::new(crate::backends::llama::LlamaCppBackend::new(
                 params.clone(),
                 self.config.max_memory_fraction,
+                n_parallel,
+                self.config.manual_kv,
+                self.config.auto_kv,
             )),
             crate::model::ModelType::Safetensors => Arc::new(crate::backends::candle::CandleBackend::new(
                 params.clone(),
@@ -388,7 +403,7 @@ impl Engine {
         let entry = Arc::new(LoadedModel {
             info,
             backend,
-            last_used: std::sync::Mutex::new(Instant::now()),
+            last_used: std::sync::atomic::AtomicU64::new(now_millis()),
             gpu_layers: params.n_gpu_layers,
         });
         self.loaded.write().await.insert(name, entry.clone());

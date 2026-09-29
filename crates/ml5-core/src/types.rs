@@ -131,6 +131,7 @@ pub struct ChatRequest {
     pub params: SamplingParams,
     pub overrides: RequestOverrides,
     pub stream: bool,
+    pub cache: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +141,7 @@ pub struct GenerateRequest {
     pub params: SamplingParams,
     pub overrides: RequestOverrides,
     pub stream: bool,
+    pub cache: bool,
 }
 
 #[derive(Debug, Clone)]

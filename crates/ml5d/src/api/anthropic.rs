@@ -104,6 +104,7 @@ fn to_chat_request(body: &MessagesBody) -> ChatRequest {
         },
         overrides: RequestOverrides::default(),
         stream: body.stream,
+        cache: false,
     }
 }
 

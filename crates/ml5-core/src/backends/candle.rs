@@ -146,6 +146,7 @@ impl Backend for CandleBackend {
             params: req.params,
             overrides: req.overrides,
             stream: req.stream,
+            cache: req.cache,
         })
         .await
     }

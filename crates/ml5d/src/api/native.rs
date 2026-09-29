@@ -47,6 +47,8 @@ pub struct ChatBody {
     pub overrides: RequestOverrides,
     #[serde(default = "default_true")]
     pub stream: bool,
+    #[serde(default)]
+    pub cache: bool,
 }
 
 fn default_true() -> bool {
@@ -92,6 +94,7 @@ pub async fn chat(
         },
         overrides: body.overrides,
         stream: body.stream,
+        cache: body.cache,
     };
 
     native_response(state, body.model, body.stream, Some(req), None).await
@@ -213,6 +216,8 @@ pub struct GenerateBody {
     pub overrides: RequestOverrides,
     #[serde(default = "default_true")]
     pub stream: bool,
+    #[serde(default)]
+    pub cache: bool,
 }
 
 pub async fn generate(
@@ -242,6 +247,7 @@ pub async fn generate(
         },
         overrides: body.overrides,
         stream: body.stream,
+        cache: body.cache,
     };
 
     native_response(state, body.model, body.stream, None, Some(req)).await

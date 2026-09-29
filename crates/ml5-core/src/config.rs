@@ -88,6 +88,16 @@ pub struct Config {
     pub max_loaded_models: usize,
     pub model: ModelParams,
     pub max_memory_fraction: f32,
+    pub parallel: bool,
+    pub n_parallel: usize,
+    pub manual_kv: bool,
+    pub auto_kv: bool,
+}
+
+impl Config {
+    pub fn kv_caching(&self) -> bool {
+        self.manual_kv || self.auto_kv
+    }
 }
 
 impl Default for Config {
@@ -100,6 +110,10 @@ impl Default for Config {
             max_loaded_models: 2,
             model: ModelParams::default(),
             max_memory_fraction: MAX_MEMORY_FRACTION,
+            parallel: false,
+            n_parallel: 1,
+            manual_kv: false,
+            auto_kv: false,
         }
     }
 }
@@ -121,6 +135,7 @@ impl Config {
             || !self.max_memory_fraction.is_finite()
             || !(0.0..=1.0).contains(&self.max_memory_fraction)
             || self.max_memory_fraction == 0.0
+            || (self.parallel && self.n_parallel == 0)
         {
             return Err(crate::error::Ml5Error::InvalidRequest(
                 "Batch/model limits must be positive and max_memory_fraction must be in (0, 1]."

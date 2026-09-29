@@ -73,6 +73,31 @@ struct Args {
 
     #[arg(
         long,
+        alias = "concurrent-on",
+        help = "Enable continuous batching so concurrent requests share one context"
+    )]
+    parallel: bool,
+
+    #[arg(
+        long,
+        help = "Max simultaneous requests per model when --parallel is on (default: CPU cores, capped at 8)"
+    )]
+    n_parallel: Option<usize>,
+
+    #[arg(
+        long,
+        help = "Prefix caching: reuse KV across requests only when the request sets cache=true"
+    )]
+    manual_kv: bool,
+
+    #[arg(
+        long,
+        help = "Prefix caching: always cache every request's prefix automatically"
+    )]
+    auto_kv: bool,
+
+    #[arg(
+        long,
         help = "Max fraction of RAM+VRAM to use before aborting load (default 0.85)"
     )]
     max_memory_fraction: Option<f32>,
@@ -126,6 +151,21 @@ async fn main() -> anyhow::Result<()> {
     if args.mlock {
         config.model.use_mlock = true;
     }
+    if args.parallel {
+        config.parallel = true;
+        config.n_parallel = args.n_parallel.unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .min(8)
+        });
+    }
+    if args.manual_kv {
+        config.manual_kv = true;
+    }
+    if args.auto_kv {
+        config.auto_kv = true;
+    }
     if let Some(v) = args.max_memory_fraction {
         config.max_memory_fraction = v;
     }
@@ -174,10 +214,19 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     eprintln!("ML5 ready at http://{addr} | OpenAI API: http://{addr}/v1");
     eprintln!(
-        "Models: {} | Context: {} | Requested GPU layers: {}",
+        "Models: {} | Context: {} | Requested GPU layers: {} | Parallel: {}",
         config.models_dir.display(),
         config.model.n_ctx,
-        config.model.n_gpu_layers
+        config.model.n_gpu_layers,
+        if config.parallel {
+            format!("{} slots (continuous batching)", config.n_parallel)
+        } else if config.auto_kv {
+            "off (auto prefix-caching)".to_string()
+        } else if config.manual_kv {
+            "off (manual prefix-caching)".to_string()
+        } else {
+            "off".to_string()
+        }
     );
     eprintln!("Try `ml5 list` or `ml5 pull hf:owner/repo`. Ctrl+C stops a foreground server; use `ml5d --stop` for a background server.");
     axum::serve(listener, app)

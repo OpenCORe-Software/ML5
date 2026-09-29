@@ -44,6 +44,8 @@ pub struct OllamaGenerateBody {
     pub options: Option<OllamaOptions>,
     #[serde(default)]
     pub stream: Option<bool>,
+    #[serde(default)]
+    pub keep_alive: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,6 +56,8 @@ pub struct OllamaChatBody {
     pub options: Option<OllamaOptions>,
     #[serde(default)]
     pub stream: Option<bool>,
+    #[serde(default)]
+    pub keep_alive: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,6 +83,8 @@ pub struct OllamaOptions {
     pub num_ctx: Option<u32>,
     pub num_gpu: Option<i32>,
     pub num_thread: Option<i32>,
+    #[serde(default, alias = "keep_in_cache")]
+    pub cache: bool,
 }
 
 impl OllamaOptions {
@@ -108,10 +114,29 @@ impl OllamaOptions {
     }
 }
 
+fn wants_unload(keep_alive: &Option<serde_json::Value>) -> bool {
+    match keep_alive {
+        Some(serde_json::Value::Number(n)) => n.as_i64() == Some(0),
+        Some(serde_json::Value::String(s)) => s == "0" || s == "0s",
+        _ => false,
+    }
+}
+
 pub async fn generate(
     State(state): State<AppState>,
     Json(body): Json<OllamaGenerateBody>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    if wants_unload(&body.keep_alive) && body.prompt.as_deref().unwrap_or("").is_empty() {
+        state.engine.unload_model(&body.model).await.map_err(err_response)?;
+        return Ok(Json(serde_json::json!({
+            "model": body.model,
+            "created_at": now_rfc3339(),
+            "response": "",
+            "done": true,
+        }))
+        .into_response());
+    }
+
     let streaming = body.stream.unwrap_or(true);
     let opts = body.options.unwrap_or_default();
     let mut prompt = body.prompt.clone().unwrap_or_default();
@@ -125,6 +150,7 @@ pub async fn generate(
         params: opts.to_sampling(),
         overrides: opts.to_overrides(),
         stream: streaming,
+        cache: opts.cache,
     };
 
     let mut stream = state.engine.generate(req).await.map_err(err_response)?;
@@ -189,6 +215,17 @@ pub async fn chat(
     State(state): State<AppState>,
     Json(body): Json<OllamaChatBody>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    if wants_unload(&body.keep_alive) && body.messages.is_empty() {
+        state.engine.unload_model(&body.model).await.map_err(err_response)?;
+        return Ok(Json(serde_json::json!({
+            "model": body.model,
+            "created_at": now_rfc3339(),
+            "message": { "role": "assistant", "content": "" },
+            "done": true,
+        }))
+        .into_response());
+    }
+
     let streaming = body.stream.unwrap_or(true);
     let opts = body.options.unwrap_or_default();
     let req = ChatRequest {
@@ -205,6 +242,7 @@ pub async fn chat(
         params: opts.to_sampling(),
         overrides: opts.to_overrides(),
         stream: streaming,
+        cache: opts.cache,
     };
 
     let mut stream = state.engine.chat(req).await.map_err(err_response)?;
@@ -385,4 +423,192 @@ pub async fn ps(State(state): State<AppState>) -> impl IntoResponse {
         })
         .collect();
     Json(serde_json::json!({ "models": models }))
+}
+
+
+#[derive(Debug, Deserialize)]
+pub struct OllamaPullBody {
+    pub model: Option<String>,
+    pub name: Option<String>,
+    #[serde(default)]
+    pub insecure: bool,
+    #[serde(default)]
+    pub stream: Option<bool>,
+}
+
+pub async fn pull(
+    State(state): State<AppState>,
+    Json(body): Json<OllamaPullBody>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let name = body
+        .model
+        .clone()
+        .or(body.name.clone())
+        .ok_or_else(|| err_response(Ml5Error::InvalidRequest("missing model name".into())))?;
+
+    let (registry, model) = if let Some(rest) = name
+        .strip_prefix("hf.co/")
+        .or_else(|| name.strip_prefix("huggingface.co/"))
+    {
+        ("hf", rest.to_string())
+    } else if name.contains('/') {
+        ("hf", name.clone())
+    } else {
+        ("core", name.clone())
+    };
+
+    let source = ml5_core::pull::parse_pull_target(registry, &model).map_err(err_response)?;
+    let engine = state.engine.clone();
+    let models_dir = engine.config.models_dir.clone();
+    let pull_key = format!("{source:?}");
+    let tx = engine.register_pull(&pull_key).await.map_err(err_response)?;
+    let mut rx = tx.subscribe();
+    let streaming = body.stream.unwrap_or(true);
+
+    tokio::spawn(async move {
+        use ml5_core::pull::PullEvent;
+        let result = ml5_core::pull::pull(&source, &models_dir, None, None, |ev| {
+            let _ = tx.send(ev);
+        })
+        .await;
+        match result {
+            Ok((name, path)) => {
+                tracing::info!(%name, path = %path.display(), "model pulled");
+                match engine.scan_models().await {
+                    Ok(()) => {
+                        let _ = tx.send(PullEvent::Done { model: name });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(PullEvent::Error {
+                            error: format!("Downloaded but could not register model: {e}"),
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(%e, "pull failed");
+                let _ = tx.send(PullEvent::Error {
+                    error: e.to_string(),
+                });
+            }
+        }
+        engine.finish_pull(&pull_key).await;
+    });
+
+    if !streaming {
+        let mut last = serde_json::json!({ "status": "pulling" });
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    let done = matches!(
+                        ev,
+                        ml5_core::pull::PullEvent::Done { .. } | ml5_core::pull::PullEvent::Error { .. }
+                    );
+                    last = ollama_pull_status(&ev);
+                    if done {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        return Ok(Json(last).into_response());
+    }
+
+    let stream = async_stream::stream! {
+        loop {
+            let ev = match rx.recv().await {
+                Ok(ev) => ev,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => {
+                    yield Ok::<Event, Infallible>(Event::default().json_data(serde_json::json!({ "status": "error" })).unwrap());
+                    break;
+                }
+            };
+            let done = matches!(ev, ml5_core::pull::PullEvent::Done { .. } | ml5_core::pull::PullEvent::Error { .. });
+            yield Ok::<Event, Infallible>(Event::default().json_data(ollama_pull_status(&ev)).unwrap());
+            if done {
+                break;
+            }
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()).into_response())
+}
+
+fn ollama_pull_status(ev: &ml5_core::pull::PullEvent) -> serde_json::Value {
+    use ml5_core::pull::PullEvent;
+    match ev {
+        PullEvent::Resolving { target } => serde_json::json!({ "status": format!("pulling {target}") }),
+        PullEvent::Downloading { file } => serde_json::json!({ "status": format!("pulling {file}") }),
+        PullEvent::Progress { downloaded, total } => serde_json::json!({
+            "status": "pulling",
+            "completed": downloaded,
+            "total": total,
+        }),
+        PullEvent::Verifying { file } => serde_json::json!({ "status": format!("verifying {file}") }),
+        PullEvent::Done { model } => serde_json::json!({ "status": "success", "model": model }),
+        PullEvent::Error { error } => serde_json::json!({ "status": "error", "error": error }),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OllamaDeleteBody {
+    pub model: Option<String>,
+    pub name: Option<String>,
+}
+
+pub async fn delete(
+    State(state): State<AppState>,
+    Json(body): Json<OllamaDeleteBody>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let name = body
+        .model
+        .or(body.name)
+        .ok_or_else(|| err_response(Ml5Error::InvalidRequest("missing model name".into())))?;
+    state.engine.delete_model(&name).await.map_err(err_response)?;
+    Ok(StatusCode::OK.into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OllamaCopyBody {
+    pub source: String,
+    pub destination: String,
+}
+
+pub async fn copy(
+    State(state): State<AppState>,
+    Json(body): Json<OllamaCopyBody>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let info = state
+        .engine
+        .get_model(&body.source)
+        .await
+        .map_err(err_response)?;
+    if info.model_type != ml5_core::model::ModelType::Gguf {
+        return Err(err_response(Ml5Error::InvalidRequest(
+            "copy is only supported for single-file GGUF models".into(),
+        )));
+    }
+    let dest = info
+        .path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(format!("{}.gguf", sanitize_name(&body.destination)));
+    if dest.exists() {
+        return Err(err_response(Ml5Error::InvalidRequest(format!(
+            "'{}' already exists",
+            body.destination
+        ))));
+    }
+    tokio::fs::copy(&info.path, &dest).await.map_err(|e| {
+        err_response(Ml5Error::Backend(format!("copy failed: {e}")))
+    })?;
+    state.engine.scan_models().await.map_err(err_response)?;
+    Ok(StatusCode::OK.into_response())
+}
+
+fn sanitize_name(n: &str) -> String {
+    n.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '-' })
+        .collect()
 }

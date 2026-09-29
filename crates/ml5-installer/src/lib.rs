@@ -5,6 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const UPDATE_SERVER: &str = "https://updates.ml5.opencore.one";
+const GITHUB_RELEASE: &str = "https://github.com/OpenCORe-Software/ML5/releases/latest/download";
 const LLAMA_RELEASE: &str = "b10687";
 const LLAMA_LEGACY_CUDA_RELEASE: &str = "b3617";
 
@@ -359,35 +360,47 @@ async fn fetch_binary(
     name: &str,
     dest: &Path,
 ) -> Result<()> {
-    let check: serde_json::Value = client
-        .get(format!("{UPDATE_SERVER}/api/check?version=0.0.0&binary={name}"))
-        .send()
-        .await
-        .context("update server check failed")?
-        .json()
-        .await
-        .context("bad update server response")?;
+    let from_server = async {
+        let check: serde_json::Value = client
+            .get(format!("{UPDATE_SERVER}/api/check?version=0.0.0&binary={name}"))
+            .send()
+            .await
+            .context("update server check failed")?
+            .json()
+            .await
+            .context("bad update server response")?;
 
-    let url = check["download_url"]
-        .as_str()
-        .ok_or_else(|| anyhow!("no download URL for {name} on update server"))?;
-    let expected_sha = check["sha256"].as_str().unwrap_or("").to_string();
+        let url = check["download_url"]
+            .as_str()
+            .ok_or_else(|| anyhow!("no download URL for {name} on update server"))?;
+        let expected_sha = check["sha256"].as_str().unwrap_or("").to_string();
 
-    let full_url = if url.starts_with("http") {
-        url.to_string()
-    } else {
-        format!("{UPDATE_SERVER}{url}")
+        let full_url = if url.starts_with("http") {
+            url.to_string()
+        } else {
+            format!("{UPDATE_SERVER}{url}")
+        };
+
+        let data = download_with_progress(client, &full_url, name).await?;
+
+        if !expected_sha.is_empty() {
+            use sha2::Digest;
+            let actual = hex::encode(sha2::Sha256::digest(&data));
+            if actual != expected_sha {
+                bail!("SHA256 mismatch for {name}");
+            }
+        }
+        Ok::<Vec<u8>, anyhow::Error>(data)
     };
 
-    let data = download_with_progress(client, &full_url, name).await?;
-
-    if !expected_sha.is_empty() {
-        use sha2::Digest;
-        let actual = hex::encode(sha2::Sha256::digest(&data));
-        if actual != expected_sha {
-            bail!("SHA256 mismatch for {name}");
+    let data = match from_server.await {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[ml5] update server unreachable ({e}); falling back to GitHub release");
+            let url = format!("{GITHUB_RELEASE}/{name}");
+            download_with_progress(client, &url, name).await?
         }
-    }
+    };
 
     std::fs::create_dir_all(dest)?;
     std::fs::write(dest.join(name), &data)?;

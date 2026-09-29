@@ -15,6 +15,7 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc, OnceLock};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 const DEFAULT_MAX_TOKENS: u32 = 512;
@@ -37,38 +38,41 @@ impl HarmonyOutput {
         }
     }
 
-    fn push(&mut self, piece: &str) -> String {
+    fn push<'a>(&mut self, piece: &'a str) -> std::borrow::Cow<'a, str> {
+        use std::borrow::Cow;
         match piece {
             "<|start|>" => {
                 self.header = true;
                 self.channel = false;
                 self.metadata.clear();
-                String::new()
+                Cow::Borrowed("")
             }
             "<|channel|>" | "<|meta_sep|>" => {
                 self.header = true;
                 self.channel = true;
                 self.metadata.clear();
-                String::new()
+                Cow::Borrowed("")
             }
             "<|message|>" | "<|im_sep|>" => {
                 self.header = false;
                 if self.metadata.trim() == "analysis" {
                     self.thinking = true;
-                    "<think>\n".into()
+                    Cow::Borrowed("<think>\n")
                 } else {
-                    String::new()
+                    Cow::Borrowed("")
                 }
             }
-            "<|end|>" | "<|im_end|>" => self.finish(),
-            "<|return|>" | "<|fim_suffix|>" | "<|call|>" | "<|ghissue|>" => self.finish(),
+            "<|end|>" | "<|im_end|>" => Cow::Owned(self.finish()),
+            "<|return|>" | "<|fim_suffix|>" | "<|call|>" | "<|ghissue|>" => {
+                Cow::Owned(self.finish())
+            }
             _ if self.header => {
                 if self.channel {
                     self.metadata.push_str(piece);
                 }
-                String::new()
+                Cow::Borrowed("")
             }
-            _ => piece.into(),
+            _ => Cow::Borrowed(piece),
         }
     }
 
@@ -205,28 +209,38 @@ struct StopFilter {
     stops: Vec<String>,
     pending: String,
     stopped: bool,
+    max_stop_len: usize,
 }
 
 impl StopFilter {
     fn new(stops: Vec<String>) -> Self {
+        let stops: Vec<String> = stops.into_iter().filter(|s| !s.is_empty()).collect();
+        let max_stop_len = stops.iter().map(|s| s.len()).max().unwrap_or(0);
         Self {
-            stops: stops.into_iter().filter(|s| !s.is_empty()).collect(),
+            stops,
             pending: String::new(),
             stopped: false,
+            max_stop_len,
         }
     }
 
     fn push(&mut self, text: &str) -> (String, bool) {
         self.pending.push_str(text);
+        if self.stops.is_empty() {
+            return (std::mem::take(&mut self.pending), false);
+        }
         if let Some(pos) = self.stops.iter().filter_map(|s| self.pending.find(s)).min() {
             let output = self.pending[..pos].to_string();
             self.pending.clear();
             self.stopped = true;
             return (output, true);
         }
+        let floor = self.pending.len().saturating_sub(self.max_stop_len);
         let keep = self
             .pending
             .char_indices()
+            .rev()
+            .take_while(|(i, _)| *i >= floor)
             .map(|(i, _)| &self.pending[i..])
             .filter(|suffix| self.stops.iter().any(|s| s.starts_with(suffix)))
             .map(str::len)
@@ -285,7 +299,13 @@ struct WorkerHandle {
 }
 
 impl WorkerHandle {
-    fn spawn(path: &Path, params: ModelParams, max_mem_fraction: f32) -> Result<Self> {
+    fn spawn(
+        path: &Path,
+        params: ModelParams,
+        max_mem_fraction: f32,
+        parallel: usize,
+        kv_cache: bool,
+    ) -> Result<Self> {
         let be = backend()?;
 
         let meta = std::fs::metadata(path)?;
@@ -299,7 +319,7 @@ impl WorkerHandle {
         }
 
         let gpu_offload = params.n_gpu_layers != 0;
-        let est_ctx = estimate_ctx_bytes(params.n_ctx, 2048);
+        let est_ctx = estimate_ctx_bytes(params.n_ctx, 2048).saturating_mul(parallel.max(1) as u64);
         let budget = memory_budget(max_mem_fraction, gpu_offload);
         if let Err(msg) = budget.check(model_size, est_ctx) {
             return Err(Ml5Error::Backend(format!("memory guard: {msg}")));
@@ -318,7 +338,7 @@ impl WorkerHandle {
                 "ml5-infer-{}",
                 NEXT_SEQ_ID.fetch_add(1, Ordering::Relaxed)
             ))
-            .spawn(move || inference_loop(worker_model, worker_params, rx))
+            .spawn(move || inference_loop(worker_model, worker_params, rx, parallel, kv_cache))
             .map_err(|e| Ml5Error::Backend(format!("failed to spawn inference thread: {e}")))?;
 
         Ok(Self { model, tx })
@@ -345,6 +365,7 @@ struct GenerateJob {
     prompt: String,
     params: SamplingParams,
     overrides: RequestOverrides,
+    cache: bool,
     out: mpsc::Sender<Result<StreamChunk>>,
 }
 
@@ -379,19 +400,20 @@ fn build_sampler(params: &SamplingParams, n_vocab: i32) -> LlamaSampler {
     LlamaSampler::chain_simple(chain)
 }
 
-fn run_inference(model: &LlamaModel, base: &ModelParams, job: GenerateJob) -> Result<()> {
+fn run_inference<'m>(
+    model: &'m LlamaModel,
+    base: &ModelParams,
+    job: GenerateJob,
+    cache: &mut Option<PrefixCache<'m>>,
+    kv_cache_enabled: bool,
+) -> Result<()> {
     // dear fuck
     if job.out.is_closed() {
         return Ok(());
     }
     let prompt_started = std::time::Instant::now();
     let be = backend()?;
-    let ctx_params = ctx_params_from(base, &job.overrides, false);
     let n_ctx = job.overrides.n_ctx.unwrap_or(base.n_ctx) as usize;
-
-    let mut ctx = model
-        .new_context(be, ctx_params)
-        .map_err(|e| Ml5Error::Backend(format!("failed to create context: {e}")))?;
 
     let tokens = model
         .str_to_token(&job.prompt, llama_cpp_2::model::AddBos::Always)
@@ -404,37 +426,77 @@ fn run_inference(model: &LlamaModel, base: &ModelParams, job: GenerateJob) -> Re
         )));
     }
 
+    let use_cache = kv_cache_enabled && job.cache;
+
+    let mut start_pos = 0usize;
+    if use_cache && cache.is_some() {
+        let cached = &cache.as_ref().unwrap().tokens;
+        start_pos = cached
+            .iter()
+            .zip(tokens.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+    }
+
+    let mut owned_ctx;
+    let ctx: &mut llama_cpp_2::context::LlamaContext = if use_cache {
+        if cache.is_none() {
+            let cp = ctx_params_from(base, &job.overrides, false);
+            let c = model
+                .new_context(be, cp)
+                .map_err(|e| Ml5Error::Backend(format!("failed to create context: {e}")))?;
+            *cache = Some(PrefixCache {
+                ctx: c,
+                tokens: Vec::new(),
+            });
+        }
+        let pc = cache.as_mut().unwrap();
+        let _ = pc.ctx.kv_cache_seq_rm(0, Some(start_pos as u32), None);
+        pc.tokens.clone_from(&tokens);
+        &mut pc.ctx
+    } else {
+        let cp = ctx_params_from(base, &job.overrides, false);
+        owned_ctx = model
+            .new_context(be, cp)
+            .map_err(|e| Ml5Error::Backend(format!("failed to create context: {e}")))?;
+        &mut owned_ctx
+    };
+
     let batch_size = (job.overrides.n_batch.unwrap_or(base.n_batch) as usize)
         .max(1)
         .min(n_ctx);
     let mut batch = LlamaBatch::new(batch_size, 1);
-    for (index, part) in tokens.chunks(batch_size).enumerate() {
-        if job.out.is_closed() {
-            return Ok(());
-        }
-        batch.clear();
-        let offset = index * batch_size;
-        for (i, token) in part.iter().enumerate() {
-            let pos = offset + i;
-            batch
-                .add(*token, pos as i32, &[0], pos + 1 == tokens.len())
-                .map_err(|e| Ml5Error::Backend(format!("batch failed: {e}")))?;
-        }
-        ctx.decode(&mut batch)
-            .map_err(|e| Ml5Error::Backend(format!("prompt decode failed: {e}")))?;
-        if job
-            .out
-            .blocking_send(Ok(StreamChunk {
-                progress: Some(InferenceProgress {
-                    stage: "processing_prompt".into(),
-                    completed: offset + part.len(),
-                    total: tokens.len(),
-                }),
-                ..Default::default()
-            }))
-            .is_err()
-        {
-            return Ok(());
+
+    if start_pos < tokens.len() {
+        let suffix = &tokens[start_pos..];
+        for (index, part) in suffix.chunks(batch_size).enumerate() {
+            if job.out.is_closed() {
+                return Ok(());
+            }
+            batch.clear();
+            let offset = start_pos + index * batch_size;
+            for (i, token) in part.iter().enumerate() {
+                let pos = offset + i;
+                batch
+                    .add(*token, pos as i32, &[0], pos + 1 == tokens.len())
+                    .map_err(|e| Ml5Error::Backend(format!("batch failed: {e}")))?;
+            }
+            ctx.decode(&mut batch)
+                .map_err(|e| Ml5Error::Backend(format!("prompt decode failed: {e}")))?;
+            if job
+                .out
+                .blocking_send(Ok(StreamChunk {
+                    progress: Some(InferenceProgress {
+                        stage: "processing_prompt".into(),
+                        completed: offset + part.len(),
+                        total: tokens.len(),
+                    }),
+                    ..Default::default()
+                }))
+                .is_err()
+            {
+                return Ok(());
+            }
         }
     }
     let prompt_ms = prompt_started.elapsed().as_millis() as u64;
@@ -455,7 +517,7 @@ fn run_inference(model: &LlamaModel, base: &ModelParams, job: GenerateJob) -> Re
         if job.out.is_closed() {
             return Ok(());
         }
-        let token: LlamaToken = sampler.sample(&ctx, batch.n_tokens() - 1);
+        let token: LlamaToken = sampler.sample(ctx, batch.n_tokens() - 1);
         sampler.accept(token);
 
         if model.is_eog_token(token) {
@@ -467,10 +529,10 @@ fn run_inference(model: &LlamaModel, base: &ModelParams, job: GenerateJob) -> Re
         let piece = model
             .token_to_piece(token, &mut decoder, true, None)
             .map_err(|e| Ml5Error::Backend(format!("Cannot decode generated token: {e}")))?;
-        let piece = if let Some(harmony) = &mut harmony {
+        let piece: std::borrow::Cow<str> = if let Some(harmony) = &mut harmony {
             harmony.push(&piece)
         } else {
-            piece
+            std::borrow::Cow::Owned(piece)
         };
         let (filtered, matched_stop) = stop_filter.push(&piece);
 
@@ -519,6 +581,11 @@ fn run_inference(model: &LlamaModel, base: &ModelParams, job: GenerateJob) -> Re
         ..Default::default()
     }));
     Ok(())
+}
+
+struct PrefixCache<'m> {
+    ctx: llama_cpp_2::context::LlamaContext<'m>,
+    tokens: Vec<LlamaToken>,
 }
 
 fn run_embed(
@@ -591,13 +658,113 @@ fn run_embed(
     })
 }
 
-fn inference_loop(model: Arc<LlamaModel>, params: ModelParams, rx: std_mpsc::Receiver<Job>) {
+struct Slot {
+    seq_id: i32,
+    prompt: Vec<LlamaToken>,
+    prompt_pos: usize,
+    generated: u32,
+    max_tokens: usize,
+    sampler: LlamaSampler,
+    decoder: encoding_rs::Decoder,
+    stop: StopFilter,
+    harmony: Option<HarmonyOutput>,
+    out: mpsc::Sender<Result<StreamChunk>>,
+    prompt_started: std::time::Instant,
+    generation_started: Option<std::time::Instant>,
+    prompt_ms: u64,
+    finish_reason: &'static str,
+    last_token: Option<LlamaToken>,
+    pending_logits: bool,
+    cache: bool,
+}
+
+impl Slot {
+    fn new(
+        seq_id: i32,
+        job: GenerateJob,
+        model: &LlamaModel,
+        n_ctx: usize,
+        start_pos: usize,
+    ) -> Result<Self> {
+        let tokens = model
+            .str_to_token(&job.prompt, llama_cpp_2::model::AddBos::Always)
+            .map_err(|e| Ml5Error::Backend(format!("tokenization failed: {e}")))?;
+        if tokens.len() >= n_ctx.saturating_sub(1) {
+            return Err(Ml5Error::InvalidRequest(format!(
+                "prompt ({} tokens) exceeds context size ({n_ctx})",
+                tokens.len()
+            )));
+        }
+        let max_tokens = (job.params.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS) as usize)
+            .min(n_ctx - tokens.len());
+        let harmony = (model.meta_val_str("general.architecture").as_deref() == Ok("gpt-oss"))
+            .then(|| HarmonyOutput::new(&job.prompt));
+        Ok(Self {
+            seq_id,
+            prompt: tokens,
+            prompt_pos: start_pos,
+            generated: 0,
+            max_tokens,
+            sampler: build_sampler(&job.params, model.n_vocab()),
+            decoder: encoding_rs::UTF_8.new_decoder(),
+            stop: StopFilter::new(job.params.stop.clone()),
+            harmony,
+            out: job.out,
+            prompt_started: std::time::Instant::now(),
+            generation_started: None,
+            prompt_ms: 0,
+            finish_reason: "length",
+            last_token: None,
+            pending_logits: false,
+            cache: job.cache,
+        })
+    }
+
+    fn prompt_done(&self) -> bool {
+        self.prompt_pos >= self.prompt.len()
+    }
+}
+
+fn inference_loop(
+    model: Arc<LlamaModel>,
+    params: ModelParams,
+    rx: std_mpsc::Receiver<Job>,
+    parallel: usize,
+    kv_cache: bool,
+) {
+    if parallel <= 1 {
+        serial_loop(model, params, rx, kv_cache);
+    } else {
+        parallel_loop(model, params, rx, parallel, kv_cache);
+    }
+}
+
+fn serial_loop(
+    model: Arc<LlamaModel>,
+    params: ModelParams,
+    rx: std_mpsc::Receiver<Job>,
+    kv_cache: bool,
+) {
+    let mut cache: Option<PrefixCache> = None;
     while let Ok(job) = rx.recv() {
         match job {
             Job::Generate(j) => {
                 let out = j.out.clone();
-                if let Err(e) = run_inference(&model, &params, j) {
-                    let _ = out.blocking_send(Err(e));
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_inference(&model, &params, j, &mut cache, kv_cache)
+                }));
+                match res {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        let _ = out.blocking_send(Err(e));
+                    }
+                    Err(_) => {
+                        tracing::error!("inference panicked; dropping KV cache state");
+                        cache = None;
+                        let _ = out.blocking_send(Err(Ml5Error::Backend(
+                            "inference panicked (request aborted; worker survived)".into(),
+                        )));
+                    }
                 }
             }
             Job::Embed {
@@ -608,6 +775,7 @@ fn inference_loop(model: Arc<LlamaModel>, params: ModelParams, rx: std_mpsc::Rec
                 let _ = reply.send(run_embed(&model, &params, &overrides, input));
             }
             Job::Unload(reply) => {
+                drop(cache);
                 drop(model);
                 let _ = reply.send(());
                 return;
@@ -615,6 +783,338 @@ fn inference_loop(model: Arc<LlamaModel>, params: ModelParams, rx: std_mpsc::Rec
         }
     }
     tracing::debug!("inference worker exited");
+}
+
+fn parallel_loop(
+    model: Arc<LlamaModel>,
+    params: ModelParams,
+    rx: std_mpsc::Receiver<Job>,
+    parallel: usize,
+    kv_cache: bool,
+) {
+    loop {
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            parallel_loop_inner(&model, &params, &rx, parallel, kv_cache)
+        }));
+        match res {
+            Ok(Ok(())) => break,
+            Ok(Err(e)) => {
+                tracing::error!("parallel inference loop error: {e}; restarting with fresh context");
+            }
+            Err(_) => {
+                tracing::error!("parallel inference panicked; restarting with fresh context");
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    tracing::debug!("inference worker exited");
+}
+
+fn parallel_loop_inner(
+    model: &Arc<LlamaModel>,
+    params: &ModelParams,
+    rx: &std_mpsc::Receiver<Job>,
+    parallel: usize,
+    kv_cache: bool,
+) -> Result<()> {
+    let be = backend()?;
+    let per_slot_ctx = params.n_ctx as usize;
+    let total_ctx = per_slot_ctx.saturating_mul(parallel);
+    let n_batch = (params.n_batch as usize).max(1);
+    let n_ubatch = (params.n_ubatch as usize).max(1);
+
+    let mut ctx_params = ctx_params_from(params, &RequestOverrides::default(), false)
+        .with_n_seq_max(parallel as u32);
+    ctx_params = ctx_params.with_n_ctx(NonZeroU32::new(total_ctx.max(1) as u32));
+    let mut ctx = model
+        .new_context(be, ctx_params)
+        .map_err(|e| Ml5Error::Backend(format!(
+            "failed to create context ({total_ctx} cells = {per_slot_ctx} x {parallel} slots): {e}"
+        )))?;
+
+    let mut slots: Vec<Option<Slot>> = (0..parallel).map(|_| None).collect();
+    let mut slot_prefix: Vec<Vec<LlamaToken>> = (0..parallel).map(|_| Vec::new()).collect();
+    let mut batch = LlamaBatch::new(n_batch.max(parallel), parallel as i32);
+    let mut next_seq: i32 = 0;
+    let mut pending_unload: Option<oneshot::Sender<()>> = None;
+
+    loop {
+        loop {
+            let idle = slots.iter().all(Option::is_none);
+            let job = if idle {
+                match rx.recv() {
+                    Ok(j) => Some(j),
+                    Err(_) => None,
+                }
+            } else {
+                match rx.try_recv() {
+                    Ok(j) => Some(j),
+                    Err(std_mpsc::TryRecvError::Empty) => {
+                        match rx.recv_timeout(Duration::from_millis(1)) {
+                            Ok(j) => Some(j),
+                            Err(_) => None,
+                        }
+                    }
+                    Err(std_mpsc::TryRecvError::Disconnected) => None,
+                }
+            };
+            let job = match job {
+                Some(j) => j,
+                None if idle => return Ok(()),
+                None => break,
+            };
+            match job {
+                Job::Unload(reply) => {
+                    if slots.iter().all(Option::is_none) {
+                        let _ = reply.send(());
+                        return Ok(());
+                    }
+                    pending_unload = Some(reply);
+                }
+                Job::Embed { reply, .. } => {
+                    let _ = reply.send(Err(Ml5Error::InvalidRequest(
+                        "embed is not available while --parallel is active; unload the model first".into(),
+                    )));
+                }
+                Job::Generate(j) => {
+                    if let Some(idx) = slots.iter().position(Option::is_none) {
+                        let out = j.out.clone();
+                        let want_cache = kv_cache && j.cache;
+                        let mut start_pos = 0usize;
+                        let mut best_idx = idx;
+                        if want_cache {
+                            let probe = model
+                                .str_to_token(&j.prompt, llama_cpp_2::model::AddBos::Always)
+                                .unwrap_or_default();
+                            let mut best_len = 0usize;
+                            for (i, p) in slot_prefix.iter().enumerate() {
+                                if slots[i].is_some() || p.is_empty() {
+                                    continue;
+                                }
+                                let common = p
+                                    .iter()
+                                    .zip(probe.iter())
+                                    .take_while(|(a, b)| a == b)
+                                    .count();
+                                if common > best_len {
+                                    best_len = common;
+                                    best_idx = i;
+                                }
+                            }
+                            start_pos = best_len;
+                            if start_pos > 0 {
+                                let _ = ctx.kv_cache_seq_rm(
+                                    best_idx as i32,
+                                    Some(start_pos as u32),
+                                    None,
+                                );
+                            }
+                        }
+                        match Slot::new(best_idx as i32, j, model, per_slot_ctx, start_pos) {
+                            Ok(s) => {
+                                slots[best_idx] = Some(s);
+                                next_seq = next_seq.wrapping_add(1);
+                            }
+                            Err(e) => {
+                                let _ = out.blocking_send(Err(e));
+                            }
+                        }
+                    } else {
+                        let _ = j.out.blocking_send(Err(Ml5Error::InvalidRequest(
+                            "all parallel slots are busy; retry shortly".into(),
+                        )));
+                    }
+                }
+            }
+            if slots.iter().all(Option::is_none) && rx.try_recv().is_err() {
+                break;
+            }
+        }
+
+        batch.clear();
+        let mut logit_idx_of_slot: Vec<Option<i32>> = vec![None; parallel];
+        let batch_budget = n_batch;
+
+        for (i, slot_opt) in slots.iter_mut().enumerate() {
+            let slot = match slot_opt {
+                Some(s) => s,
+                None => continue,
+            };
+            if slot.out.is_closed() {
+                slot_prefix[i] = Vec::new();
+                let _ = ctx.kv_cache_seq_rm(slot.seq_id, None, None);
+                *slot_opt = None;
+                continue;
+            }
+            if slot.prompt_done() {
+                continue;
+            }
+
+            let used = batch.n_tokens() as usize;
+            if used >= batch_budget {
+                break;
+            }
+            let room = batch_budget - used;
+
+            let remaining = slot.prompt.len() - slot.prompt_pos;
+            let take = remaining.min(n_ubatch).min(room);
+            let chunk_end = slot.prompt_pos + take;
+            for (j, t) in slot.prompt[slot.prompt_pos..chunk_end].iter().enumerate() {
+                let pos = slot.prompt_pos + j;
+                let is_last = pos + 1 == slot.prompt.len();
+                let off = batch.n_tokens();
+                batch
+                    .add(*t, pos as i32, &[slot.seq_id], is_last)
+                    .map_err(|e| Ml5Error::Backend(format!("batch failed: {e}")))?;
+                if is_last {
+                    logit_idx_of_slot[i] = Some(off);
+                    slot.pending_logits = true;
+                }
+            }
+            slot.prompt_pos = chunk_end;
+
+            let _ = slot.out.blocking_send(Ok(StreamChunk {
+                progress: Some(InferenceProgress {
+                    stage: "processing_prompt".into(),
+                    completed: slot.prompt_pos,
+                    total: slot.prompt.len(),
+                }),
+                ..Default::default()
+            }));
+        }
+
+        for (i, slot_opt) in slots.iter_mut().enumerate() {
+            let slot = match slot_opt {
+                Some(s) => s,
+                None => continue,
+            };
+            if slot.pending_logits {
+                continue;
+            }
+            let Some(tok) = slot.last_token else { continue };
+            if slot.generated as usize >= slot.max_tokens || slot.finish_reason == "stop" {
+                continue;
+            }
+            if slot.out.is_closed() {
+                slot_prefix[i] = Vec::new();
+                let _ = ctx.kv_cache_seq_rm(slot.seq_id, None, None);
+                *slot_opt = None;
+                continue;
+            }
+            let used = batch.n_tokens() as usize;
+            if used >= batch_budget {
+                break;
+            }
+            let pos = slot.prompt.len() + slot.generated as usize - 1;
+            let off = batch.n_tokens();
+            batch
+                .add(tok, pos as i32, &[slot.seq_id], true)
+                .map_err(|e| Ml5Error::Backend(format!("batch failed: {e}")))?;
+            slot.pending_logits = true;
+            logit_idx_of_slot[i] = Some(off);
+        }
+
+        if batch.n_tokens() > 0 {
+            ctx.decode(&mut batch)
+                .map_err(|e| Ml5Error::Backend(format!("decode failed: {e}")))?;
+        }
+
+        for (i, slot_opt) in slots.iter_mut().enumerate() {
+            let Some(logit_idx) = logit_idx_of_slot[i] else { continue };
+            let slot = match slot_opt {
+                Some(s) => s,
+                None => continue,
+            };
+            slot.pending_logits = false;
+
+            if slot.generation_started.is_none() {
+                slot.prompt_ms = slot.prompt_started.elapsed().as_millis() as u64;
+                slot.generation_started = Some(std::time::Instant::now());
+            }
+
+            let token = slot.sampler.sample(&ctx, logit_idx);
+            slot.sampler.accept(token);
+            slot.last_token = Some(token);
+
+            let mut done = false;
+            if model.is_eog_token(token) {
+                slot.finish_reason = "stop";
+                done = true;
+            } else {
+                slot.generated += 1;
+                let piece = model
+                    .token_to_piece(token, &mut slot.decoder, true, None)
+                    .map_err(|e| Ml5Error::Backend(format!("Cannot decode generated token: {e}")))?;
+                let piece: std::borrow::Cow<str> = if let Some(h) = &mut slot.harmony {
+                    h.push(&piece)
+                } else {
+                    std::borrow::Cow::Owned(piece)
+                };
+                let (filtered, matched_stop) = slot.stop.push(&piece);
+                if !filtered.is_empty()
+                    && slot
+                        .out
+                        .blocking_send(Ok(StreamChunk {
+                            text: filtered,
+                            ..Default::default()
+                        }))
+                        .is_err()
+                {
+                    slot_prefix[i] = Vec::new();
+                    let _ = ctx.kv_cache_seq_rm(slot.seq_id, None, None);
+                    *slot_opt = None;
+                    continue;
+                }
+                if matched_stop {
+                    slot.finish_reason = "stop";
+                    done = true;
+                }
+                if slot.generated as usize >= slot.max_tokens {
+                    done = true;
+                }
+            }
+
+            if done {
+                let tail = slot.stop.finish()
+                    + &slot
+                        .harmony
+                        .as_mut()
+                        .map(HarmonyOutput::finish)
+                        .unwrap_or_default();
+                let _ = slot.out.blocking_send(Ok(StreamChunk {
+                    text: tail,
+                    done: true,
+                    usage: Some(Usage {
+                        prompt_tokens: slot.prompt.len() as u32,
+                        completion_tokens: slot.generated,
+                        prompt_ms: slot.prompt_ms,
+                        generation_ms: slot
+                            .generation_started
+                            .map(|t| t.elapsed().as_millis() as u64)
+                            .unwrap_or(0),
+                    }),
+                    finish_reason: Some(slot.finish_reason.into()),
+                    ..Default::default()
+                }));
+                if slot.cache && kv_cache {
+                    let keep = slot.prompt.len();
+                    slot_prefix[i] = slot.prompt.clone();
+                    let _ = ctx.kv_cache_seq_rm(slot.seq_id, Some(keep as u32), None);
+                } else {
+                    slot_prefix[i] = Vec::new();
+                    let _ = ctx.kv_cache_seq_rm(slot.seq_id, None, None);
+                }
+                *slot_opt = None;
+            }
+        }
+
+        if slots.iter().all(Option::is_none) {
+            if let Some(reply) = pending_unload.take() {
+                let _ = reply.send(());
+                return Ok(());
+            }
+        }
+    }
 }
 
 const CHATML_TEMPLATE: &str = "{% for message in messages %}<|im_start|>{{ message['role'] }}\n{{ message['content'] }}<|im_end|>\n{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}";
@@ -644,15 +1144,27 @@ pub struct LlamaCppBackend {
     path: Mutex<Option<PathBuf>>,
     params: Mutex<ModelParams>,
     max_mem_fraction: f32,
+    parallel: usize,
+    manual_kv: bool,
+    auto_kv: bool,
 }
 
 impl LlamaCppBackend {
-    pub fn new(params: ModelParams, max_mem_fraction: f32) -> Self {
+    pub fn new(
+        params: ModelParams,
+        max_mem_fraction: f32,
+        parallel: usize,
+        manual_kv: bool,
+        auto_kv: bool,
+    ) -> Self {
         Self {
             worker: Mutex::new(None),
             path: Mutex::new(None),
             params: Mutex::new(params),
             max_mem_fraction,
+            parallel,
+            manual_kv,
+            auto_kv,
         }
     }
 
@@ -684,7 +1196,11 @@ impl Backend for LlamaCppBackend {
         let path = model_path.to_path_buf();
         let p = params.clone();
         let frac = self.max_mem_fraction;
-        let handle = tokio::task::spawn_blocking(move || WorkerHandle::spawn(&path, p, frac))
+        let parallel = self.parallel;
+        let kv_cache = self.manual_kv || self.auto_kv;
+        let handle = tokio::task::spawn_blocking(move || {
+            WorkerHandle::spawn(&path, p, frac, parallel, kv_cache)
+        })
             .await
             .map_err(|e| Ml5Error::Backend(format!("load task failed: {e}")))??;
         *self.path.lock().await = Some(model_path.to_path_buf());
@@ -710,12 +1226,18 @@ impl Backend for LlamaCppBackend {
     async fn chat(&self, req: ChatRequest) -> Result<TokenStream> {
         let guard = self.worker().await?;
         let worker = guard.as_ref().expect("checked above");
+        if self.parallel > 1 && req.overrides.n_ctx.is_some() {
+            return Err(Ml5Error::InvalidRequest(
+                "per-request n_ctx is not supported with --parallel (slots share one context); set --ctx-size on ml5d".into(),
+            ));
+        }
         let prompt = apply_chat_template(&worker.model, &req.messages)?;
         let (tx, rx) = mpsc::channel(32);
         worker.submit(Job::Generate(GenerateJob {
             prompt,
             params: req.params,
             overrides: req.overrides,
+            cache: self.auto_kv || req.cache,
             out: tx,
         }))?;
         drop(guard);
@@ -725,11 +1247,17 @@ impl Backend for LlamaCppBackend {
     async fn generate(&self, req: GenerateRequest) -> Result<TokenStream> {
         let guard = self.worker().await?;
         let worker = guard.as_ref().expect("checked above");
+        if self.parallel > 1 && req.overrides.n_ctx.is_some() {
+            return Err(Ml5Error::InvalidRequest(
+                "per-request n_ctx is not supported with --parallel (slots share one context); set --ctx-size on ml5d".into(),
+            ));
+        }
         let (tx, rx) = mpsc::channel(32);
         worker.submit(Job::Generate(GenerateJob {
             prompt: req.prompt,
             params: req.params,
             overrides: req.overrides,
+            cache: self.auto_kv || req.cache,
             out: tx,
         }))?;
         drop(guard);

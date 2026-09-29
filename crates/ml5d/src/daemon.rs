@@ -120,6 +120,11 @@ pub fn spawn_background(config: &Config) -> anyhow::Result<()> {
     if m.use_mlock {
         cmd.arg("--mlock");
     }
+    if config.parallel {
+        cmd.arg("--parallel");
+        cmd.arg("--n-parallel")
+            .arg(config.n_parallel.to_string());
+    }
 
     cmd.stdin(Stdio::null())
         .stdout(Stdio::from(stdout_log))
