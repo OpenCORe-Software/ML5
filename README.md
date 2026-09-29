@@ -2,7 +2,6 @@
 
 <p align="center"><img src="ML5.png" alt="ML5" width="480"></p>
 
-[![CI](https://github.com/OpenCORe-Technologies/ML5/workflows/CI/badge.svg)](https://github.com/OpenCORe-Technologies/ML5/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Crates.io](https://img.shields.io/crates/v/ml5.svg)](https://crates.io/crates/ml5)
 
