@@ -4,7 +4,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const UPDATE_SERVER: &str = "https://updates.ml5.opencore.one";
+const UPDATE_SERVER: &str = "https://ml5-updates.opencore.one";
 const GITHUB_RELEASE: &str = "https://github.com/OpenCORe-Software/ML5/releases/latest/download";
 const LLAMA_RELEASE: &str = "b10687";
 const LLAMA_LEGACY_CUDA_RELEASE: &str = "b3617";

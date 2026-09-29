@@ -6,3 +6,5 @@ models/
 *.tmp
 *.old-*
 ml5d.pid
+HOWTORELEASE.md
+artifacts/
