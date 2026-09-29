@@ -4,7 +4,7 @@
 # - Installs to $PREFIX/bin (default /usr/local/bin)
 # - Registers ml5d as a service (systemd, OpenRC, runit, or sysvinit)
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/OpenCORe-Software/ML5/main/install.sh | sudo sh
+#   curl -fsSL https://raw.githubusercontent.com/OpenCORe-Software/ML5/master/install-linux.sh | sudo sh
 #   sudo sh install.sh [--prefix DIR] [--no-service] [--version TAG] [--user NAME]
 set -eu
 

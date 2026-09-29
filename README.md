@@ -30,7 +30,7 @@ OpenAI-compatible API on `http://127.0.0.1:11435`.
 
 ```powershell
 # Clone the repository
-git clone https://github.com/OpenCORe-Technologies/ML5.git
+git clone https://github.com/OpenCORe-Software/ML5.git
 cd ML5
 
 # Build release binaries

@@ -4,7 +4,7 @@
 # - Installs to $PREFIX/bin (default /usr/local/bin)
 # - Registers ml5d as a launchd LaunchDaemon (runs at boot, keeps alive)
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/OpenCORe-Software/ML5/main/install-macos.sh | sudo sh
+#   curl -fsSL https://raw.githubusercontent.com/OpenCORe-Software/ML5/master/install-macos.sh | sudo sh
 #   sudo sh install-macos.sh [--prefix DIR] [--no-service] [--version TAG] [--user NAME]
 set -eu
 
