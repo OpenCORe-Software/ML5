@@ -353,6 +353,15 @@ pub async fn show(
         .or(body.name)
         .ok_or_else(|| err_response(Ml5Error::InvalidRequest("missing model".into())))?;
     let info = state.engine.get_model(&name).await.map_err(err_response)?;
+
+    let mut caps = vec!["completion"];
+    if info.capabilities.contains(&Capability::Embed) {
+        caps.push("embedding");
+    }
+    if model_supports_thinking(&info.path) {
+        caps.push("thinking");
+    }
+
     Ok(Json(serde_json::json!({
         "license": "",
         "modelfile": "",
@@ -360,8 +369,18 @@ pub async fn show(
         "template": "",
         "modified_at": info.modified_at.map(|t| t.to_rfc3339()).unwrap_or_default(),
         "details": { "format": "gguf", "family": "", "parameter_size": "", "quantization_level": "" },
+        "capabilities": caps,
         "model_info": {},
     })))
+}
+
+fn model_supports_thinking(path: &std::path::Path) -> bool {
+    let data = match std::fs::read(path) {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    let needles: &[&[u8]] = &[b"<|channel|>", b"<think>"];
+    needles.iter().any(|n| data.windows(n.len()).any(|w| w == *n))
 }
 
 pub async fn version() -> impl IntoResponse {
