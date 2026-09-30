@@ -1,4 +1,5 @@
 use crate::state::AppState;
+use axum::body::Body;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -9,6 +10,19 @@ use ml5_core::error::Ml5Error;
 use ml5_core::types::*;
 use serde::Deserialize;
 use std::convert::Infallible;
+
+fn ndjson_response<S>(stream: S) -> axum::response::Response
+where
+    S: futures::Stream<Item = std::result::Result<String, Infallible>> + Send + 'static,
+{
+    let body = Body::from_stream(stream.map(|r| r.map(|s| format!("{s}\n"))));
+    let mut resp = axum::response::Response::new(body);
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/x-ndjson"),
+    );
+    resp
+}
 
 fn err_response(e: Ml5Error) -> (StatusCode, Json<serde_json::Value>) {
     let status = match &e {
@@ -180,8 +194,8 @@ pub async fn generate(
         return Ok(Json(v).into_response());
     }
 
-    let sse = stream.filter_map(move |chunk| {
-        let event = match chunk {
+    let ndjson = stream.filter_map(move |chunk| {
+        let line = match chunk {
             Ok(c) => {
                 let mut v = serde_json::json!({
                     "model": model,
@@ -196,19 +210,14 @@ pub async fn generate(
                         _ => Default::default(),
                     });
                 }
-                Event::default().json_data(v)
+                serde_json::to_string(&v).ok()
             }
-            Err(e) => Event::default()
-                .json_data(serde_json::json!({ "error": e.to_string() })),
+            Err(e) => serde_json::to_string(&serde_json::json!({ "error": e.to_string() })).ok(),
         };
-        futures::future::ready(Some(Ok::<_, Infallible>(
-            event.unwrap_or_else(|_| Event::default().data("serialization error")),
-        )))
+        futures::future::ready(line.map(Ok::<_, Infallible>))
     });
 
-    Ok(Sse::new(sse)
-        .keep_alive(KeepAlive::default())
-        .into_response())
+    Ok(ndjson_response(ndjson))
 }
 
 pub async fn chat(
@@ -272,8 +281,8 @@ pub async fn chat(
         return Ok(Json(v).into_response());
     }
 
-    let sse = stream.filter_map(move |chunk| {
-        let event = match chunk {
+    let ndjson = stream.filter_map(move |chunk| {
+        let line = match chunk {
             Ok(c) => {
                 let mut v = serde_json::json!({
                     "model": model,
@@ -288,19 +297,14 @@ pub async fn chat(
                         _ => Default::default(),
                     });
                 }
-                Event::default().json_data(v)
+                serde_json::to_string(&v).ok()
             }
-            Err(e) => Event::default()
-                .json_data(serde_json::json!({ "error": e.to_string() })),
+            Err(e) => serde_json::to_string(&serde_json::json!({ "error": e.to_string() })).ok(),
         };
-        futures::future::ready(Some(Ok::<_, Infallible>(
-            event.unwrap_or_else(|_| Event::default().data("serialization error")),
-        )))
+        futures::future::ready(line.map(Ok::<_, Infallible>))
     });
 
-    Ok(Sse::new(sse)
-        .keep_alive(KeepAlive::default())
-        .into_response())
+    Ok(ndjson_response(ndjson))
 }
 
 pub async fn tags(State(state): State<AppState>) -> impl IntoResponse {
