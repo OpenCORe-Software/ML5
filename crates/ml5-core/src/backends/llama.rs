@@ -14,7 +14,7 @@ use llama_cpp_2::token::LlamaToken;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc as std_mpsc, Arc, OnceLock};
+use std::sync::{mpsc as std_mpsc, Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -87,6 +87,80 @@ impl HarmonyOutput {
 
 static BACKEND: OnceLock<LlamaBackend> = OnceLock::new();
 static NEXT_SEQ_ID: AtomicUsize = AtomicUsize::new(0);
+static RPC_REGISTER: StdMutex<()> = StdMutex::new(());
+
+fn parse_tensor_split(s: &str) -> Result<Vec<f32>> {
+    let splits: Vec<f32> = s
+        .split(',')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            p.parse::<f32>().map_err(|_| {
+                Ml5Error::InvalidRequest(format!(
+                    "invalid --tensor-split entry '{p}': expected comma-separated floats like 0.5,0.5"
+                ))
+            })
+        })
+        .collect::<Result<_>>()?;
+    if splits.is_empty() {
+        return Err(Ml5Error::InvalidRequest(
+            "--tensor-split requires at least one ratio, e.g. 0.5,0.5".into(),
+        ));
+    }
+    Ok(splits)
+}
+
+fn register_rpc_nodes(nodes: &str) -> Result<()> {
+    let endpoints: Vec<&str> = nodes
+        .split(',')
+        .map(|n| n.trim())
+        .filter(|n| !n.is_empty())
+        .collect();
+    if endpoints.is_empty() {
+        return Err(Ml5Error::InvalidRequest(
+            "--rpc-nodes requires at least one host:port, e.g. node1:50052,node2:50052".into(),
+        ));
+    }
+    let _guard = RPC_REGISTER
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    unsafe {
+        if llama_cpp_sys_2::ggml_backend_reg_count() == 0 {
+            llama_cpp_sys_2::ggml_backend_load_all();
+        }
+        let rpc_reg = llama_cpp_sys_2::ggml_backend_reg_by_name(c"RPC".as_ptr());
+        if rpc_reg.is_null() {
+            return Err(Ml5Error::Backend(
+                "RPC backend not available; ensure the ggml-rpc backend library is in ~/.ml5/backends".into(),
+            ));
+        }
+        type AddServerFn = unsafe extern "C" fn(
+            *const std::ffi::c_char,
+        ) -> llama_cpp_sys_2::ggml_backend_reg_t;
+        let proc_name = c"ggml_backend_rpc_add_server";
+        let proc = llama_cpp_sys_2::ggml_backend_reg_get_proc_address(rpc_reg, proc_name.as_ptr());
+        if proc.is_null() {
+            return Err(Ml5Error::Backend(
+                "RPC backend does not expose ggml_backend_rpc_add_server".into(),
+            ));
+        }
+        let add_server: AddServerFn = std::mem::transmute(proc);
+        for endpoint in endpoints {
+            let c = std::ffi::CString::new(endpoint).map_err(|_| {
+                Ml5Error::InvalidRequest(format!("invalid RPC endpoint '{endpoint}'"))
+            })?;
+            let reg = add_server(c.as_ptr());
+            if reg.is_null() {
+                return Err(Ml5Error::Backend(format!(
+                    "failed to connect to RPC node {endpoint}"
+                )));
+            }
+            llama_cpp_sys_2::ggml_backend_register(reg);
+            tracing::info!(endpoint, "registered RPC node");
+        }
+    }
+    Ok(())
+}
 
 fn backend() -> Result<&'static LlamaBackend> {
     if let Some(b) = BACKEND.get() {
@@ -325,9 +399,43 @@ impl WorkerHandle {
             return Err(Ml5Error::Backend(format!("memory guard: {msg}")));
         }
 
+        if let Some(nodes) = params.rpc_nodes.clone() {
+            register_rpc_nodes(&nodes)?;
+        }
+
+        let splits = params
+            .tensor_split
+            .clone()
+            .map(|s| parse_tensor_split(&s))
+            .transpose()?;
+
         let mp = build_model_params(&params, params.n_gpu_layers.max(0) as u32);
-        let model = LlamaModel::load_from_file(be, path, &mp)
-            .map_err(|e| Ml5Error::Backend(format!("failed to load {}: {e}", path.display())))?;
+        let model = {
+            #[repr(C)]
+            struct ModelParamsHead {
+                params: llama_cpp_sys_2::llama_model_params,
+            }
+            let mut mp = std::pin::pin!(mp);
+            let mut split_buf: Vec<f32> = Vec::new();
+            if let Some(splits) = &splits {
+                split_buf = splits.clone();
+                unsafe {
+                    let head = &mut *(mp.as_mut().get_unchecked_mut() as *mut LlamaModelParams)
+                        .cast::<ModelParamsHead>();
+                    head.params.tensor_split = split_buf.as_ptr();
+                }
+            }
+            let loaded = LlamaModel::load_from_file(be, path, &mp);
+            if !split_buf.is_empty() {
+                unsafe {
+                    let head = &mut *(mp.as_mut().get_unchecked_mut() as *mut LlamaModelParams)
+                        .cast::<ModelParamsHead>();
+                    head.params.tensor_split = std::ptr::null();
+                }
+            }
+            loaded
+        }
+        .map_err(|e| Ml5Error::Backend(format!("failed to load {}: {e}", path.display())))?;
         let model = Arc::new(model);
 
         let (tx, rx) = std_mpsc::channel::<Job>();

@@ -34,6 +34,10 @@ pub struct ModelParams {
     pub offload_kqv: bool,
     #[serde(default)]
     pub embeddings: bool,
+    #[serde(default)]
+    pub tensor_split: Option<String>,
+    #[serde(default)]
+    pub rpc_nodes: Option<String>,
 }
 
 fn d_ctx() -> u32 {
@@ -75,6 +79,8 @@ impl Default for ModelParams {
             cache_type_v: d_kv(),
             offload_kqv: true,
             embeddings: false,
+            tensor_split: None,
+            rpc_nodes: None,
         }
     }
 }

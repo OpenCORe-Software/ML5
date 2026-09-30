@@ -267,7 +267,7 @@ async fn download_backend(backend: &str) -> Result<std::path::PathBuf> {
     for i in 0..archive.len() {
         let mut f = archive.by_index(i)?;
         let name = f.name().to_string();
-        if name.starts_with("ggml") && name.ends_with(".dll") {
+        if (name.starts_with("ggml") && name.ends_with(".dll")) || name == "ggml-rpc-server.exe" {
             let out = dir.join(&name);
             let mut outf = std::fs::File::create(&out)?;
             std::io::copy(&mut f, &mut outf)?;

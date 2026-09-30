@@ -47,6 +47,18 @@ struct Args {
     #[arg(long, help = "Main GPU index (default 0)")]
     main_gpu: Option<i32>,
 
+    #[arg(
+        long,
+        help = "Tensor split ratios across GPUs/cluster nodes, e.g. 0.5,0.5 (passed to llama.cpp --tensor-split)"
+    )]
+    tensor_split: Option<String>,
+
+    #[arg(
+        long,
+        help = "RPC cluster workers, e.g. node1:50052,node2:50052 (passed to llama.cpp --rpc)"
+    )]
+    rpc_nodes: Option<String>,
+
     #[arg(long, help = "CPU threads for generation")]
     threads: Option<i32>,
 
@@ -129,6 +141,12 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(v) = args.main_gpu {
         config.model.main_gpu = v;
+    }
+    if let Some(v) = args.tensor_split {
+        config.model.tensor_split = Some(v);
+    }
+    if let Some(v) = args.rpc_nodes {
+        config.model.rpc_nodes = Some(v);
     }
     if let Some(v) = args.threads {
         config.model.n_threads = v;

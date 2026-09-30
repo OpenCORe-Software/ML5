@@ -162,6 +162,8 @@ Key options:
 - `--models-dir`: Model storage directory (default: `~/.ml5/models`)
 - `--ctx-size`: Default context size (default: 2048)
 - `--gpu-layers`: GPU layers to offload (-1 for all, 0 for CPU only)
+- `--tensor-split`: Raw llama.cpp layer split ratios across GPUs/cluster nodes (e.g. `--tensor-split 0.5,0.5`)
+- `--rpc-nodes`: Raw llama.cpp RPC cluster workers (e.g. `--rpc-nodes node1:50052,node2:50052`); requires the ggml-rpc backend in `~/.ml5/backends`
 - `--max-memory-fraction`: Max memory usage before aborting load (default: 0.85)
 
 Build with `cargo build --release --features safetensors` for safetensors support via candle.

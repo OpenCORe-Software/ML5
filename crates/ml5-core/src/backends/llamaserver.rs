@@ -93,6 +93,12 @@ impl Backend for LlamaServerBackend {
             cmd.arg("--n-gpu-layers")
                 .arg(params.n_gpu_layers.to_string());
         }
+        if let Some(ts) = &params.tensor_split {
+            cmd.arg("--tensor-split").arg(ts);
+        }
+        if let Some(nodes) = &params.rpc_nodes {
+            cmd.arg("--rpc").arg(nodes);
+        }
         if params.n_threads > 0 {
             cmd.arg("--threads").arg(params.n_threads.to_string());
         }
