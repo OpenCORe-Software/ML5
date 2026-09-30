@@ -5,6 +5,23 @@ All notable changes to ML5 will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-09-30
+
+### Changed
+- Release binaries are now statically linked (no `gpu`/dynamic-link feature), so
+  `ml5`/`ml5d` run standalone on every platform with no shared-library hunting.
+  GPU offload via dynamic backends is an opt-in local build (`--features gpu`).
+
+### Removed
+- Legacy-CUDA backend and installer. CUDA 11.7 (the last Pascal-capable toolkit)
+  cannot be built on modern Windows toolchains, and its upstream DLL predates the
+  bindings' API. Pascal-era NVIDIA GPUs (GTX 10-series) use the Vulkan backend.
+
+### Fixed
+- Installer places core llama/ggml runtime libraries beside the binaries on
+  dynamic (gpu-feature) installs, so the daemon starts instead of failing with a
+  missing-library error.
+
 ## [0.2.0] - 2026-09-29
 
 ### Massive overhaul
