@@ -5,6 +5,18 @@ All notable changes to ML5 will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-09-30
+
+### Hotfix 0.2.2
+
+### Fixed
+- Ollama-compatible endpoints (`/ollama/api/chat`, `/ollama/api/generate`) now stream
+  newline-delimited JSON instead of SSE, matching real Ollama. Fixes "Expecting value"
+  parse failures in clients like Open WebUI.
+- `/ollama/api/show` now returns a `capabilities` array (completion, embedding, and
+  `thinking` when the model emits think/channel markers) so clients can detect
+  thinking-capable models.
+
 ## [0.2.1] - 2026-09-30
 
 ### Changed
