@@ -4,265 +4,216 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Local inference with a Rust CLI, a daemon, and native HTTP endpoints.
-OpenAI-compatible API on `http://127.0.0.1:11435`.
+Local LLM inference with a Rust CLI and daemon, serving OpenAI, Anthropic, Ollama
+and native APIs on `http://127.0.0.1:11435`.
+
+ML5 manages models and requests; inference for GGUF models runs in
+[llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server` (`--jinja`),
+one child process per loaded model. Safetensors models run in-process on
+[candle](https://github.com/huggingface/candle) when built with the `safetensors`
+feature.
 
 ## Features
 
-- Rust-native inference on llama.cpp
-- OpenAI, Anthropic, Ollama, and LM Studio compatible endpoints
-- GGUF and safetensors model formats
-- SSE streaming with progress events and token usage
-- Model pull, list, load, unload, delete, and rename
-- CUDA, Vulkan, and CPU backends
-- Memory guard with automatic model eviction
+- **Real tool calling** on every API surface (OpenAI `tools`, Anthropic `tool_use`,
+  Ollama `tools`, Responses `function_call`) using each model's own chat template.
+- **Vision**: models with an `mmproj` projector accept images (OpenAI `image_url`,
+  Anthropic image blocks, Ollama `images`, native `images`). The projector is
+  downloaded automatically with the model.
+- **Reasoning**: thinking output is separated into `reasoning_content` / `thinking`
+  blocks; turn it on or off per request (`think`, `reasoning_effort`,
+  Anthropic `thinking`).
+- **Structured output**: JSON mode and JSON-schema constrained output
+  (`response_format`, Ollama `format`, Responses `text.format`).
+- **KV-cache reuse** across requests on every API, with cached-token counts in usage.
+- **Continuous batching**: `--parallel N` serves N requests per model at once.
+- **Several models at once** with LRU eviction, idle keep-alive, memory budgeting, and
+  automatic context sizing from free RAM/VRAM.
+- **Model store**: Hugging Face pulls with quantization picking, split GGUFs,
+  resumable downloads, SHA-256 verification, cancellation, and progress events.
+- **Runtime management**: the pinned llama.cpp release is located on disk or
+  downloaded and verified on first use (CPU, Vulkan, CUDA, ROCm, Metal builds).
 
-## Quick Start (Windows)
+## Install
 
-### Prerequisites
+### Linux
 
-- Rust 1.70+ (install from [rustup.rs](https://rustup.rs))
-- Visual C++ Build Tools
-- CMake
-- libclang
+```sh
+curl -fsSL https://raw.githubusercontent.com/OpenCORe-Software/ML5/master/install-linux.sh | sudo sh
+```
 
-### Build and Install
+On systemd machines this installs `ml5d` as a **user service**
+(`/usr/lib/systemd/user/ml5d.service`, enabled globally) so it runs in each user's
+session with that user's GPU access and model store, and enables lingering for the
+installing user so the daemon also runs without a login. Manage it with
+`systemctl --user start|stop|status ml5d` and read logs with
+`journalctl --user -u ml5d`.
+
+For the GPU, install the Vulkan loader and drivers (Debian/Ubuntu:
+`sudo apt install libvulkan1 mesa-vulkan-drivers`).
+
+### macOS
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/OpenCORe-Software/ML5/master/install-macos.sh | sudo sh
+```
+
+### Windows
+
+Run the `ml5-installer` from the latest release, or install a local build:
 
 ```powershell
-# Clone the repository
-git clone https://github.com/OpenCORe-Software/ML5.git
-cd ML5
-
-# Build release binaries
 cargo build --release
-
-# Install to user PATH
-.\install.ps1
-
-# Start the daemon
-ml5d --background
+powershell -ExecutionPolicy Bypass -File install.ps1 -SourceDir .\target\release
 ```
 
-### Basic Usage
+### From source
 
-```powershell
-# Pull a model from Hugging Face
-ml5 pull hf:owner/repo
-
-# Pull with a specific quantization
-ml5 pull hf:owner/repo --quant q4_k_m
-
-# Pull a full safetensors model (requires --features safetensors build)
-ml5 pull hf:meta-llama/Llama-3.1-8B-Instruct
-
-# List installed models
-ml5 list
-
-# Rename a model
-ml5 rename <model> <new-name>
-
-# Run inference
-ml5 run <model-name>
-
-# One-shot with a message
-ml5 run <model> --message "Explain quantum computing simply" --system "Be concise"
-
-# Pipe input
-"Summarize this text" | ml5 run <model> --quiet
-
-# Advanced options
-ml5 run <model> --ctx-size 4096 --max-tokens 1024 --temperature 0.7
-
-# Check status
-ml5 status
-ml5 status --json
-
-# Check for updates
-ml5 update --check
-ml5 update
-
-# Stop the daemon
-ml5d --stop
+```sh
+cargo build --release
 ```
 
-### Interactive Mode
+See [BUILD.md](BUILD.md) for features and packaging.
 
-```powershell
-ml5 run <model>
+## Usage
+
+```sh
+ml5 pull hf:unsloth/Qwen3-8B-GGUF               # best quant that fits, plus mmproj if any
+ml5 pull hf:unsloth/Qwen3-8B-GGUF:Q5_K_M        # pick a quantization
+ml5 pull hf:owner/repo/model-Q4_K_M.gguf        # a specific file
+ml5 pulls                                       # downloads in progress
+ml5 cancel <id>                                 # cancel one (resumes on the next pull)
+
+ml5 list                                        # size, params, quant, context, capabilities
+ml5 run <model>                                 # interactive chat
+ml5 run <model> --message "Explain RAID levels" --system "Be concise"
+ml5 run <model> --message "What is in this picture?" --image photo.jpg
+ml5 run <model> --think off --max-tokens 512 --temperature 0.7
+echo "Summarize this" | ml5 run <model> --quiet
+
+ml5 load <model> --keep-alive 1h                # preload
+ml5 ps                                          # loaded models
+ml5 unload <model>
+ml5 status                                      # daemon, runtime, memory, loaded models
+ml5 rename <model> <friendly-name>
+ml5 delete <model>
+
+ml5 backend detect                              # GPUs and recommended runtime
+ml5 backend status                              # which llama-server is used
+ml5 backend download --kind vulkan              # fetch a runtime build ahead of time
 ```
 
-Commands inside interactive chat:
-- `/help` - Show available commands
-- `/clear` - Reset conversation (preserves system prompt)
-- `/model <name>` - Switch to a different model
-- `/set system <text>` - Set system prompt
-- `/exit` or `/quit` - Leave chat
+Interactive chat commands: `/help`, `/clear`, `/model <name>`,
+`/set system <text|show|clear>`, `/think on|off`, `/image <path>`, `/exit`.
 
-## API Endpoints
+## llama-server runtime
 
-### Native API (`/api/*`)
+ML5 is pinned to llama.cpp release **b10687**. It looks for `llama-server` in this
+order and uses the first one found:
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/chat` | POST | Chat completion with streaming |
-| `/api/generate` | POST | Text generation |
-| `/api/embed` | POST | Generate embeddings |
-| `/api/models` | GET | List installed models |
-| `/api/status` | GET | Daemon status and loaded models |
-| `/api/pull` | POST | Pull a model from Hugging Face |
-| `/api/delete` | POST | Delete a model |
-| `/api/unload` | POST | Unload a model from memory |
+1. `ml5d --llama-server PATH`, then the `ML5_LLAMA_SERVER` environment variable
+   (a binary or a directory containing one)
+2. `llama.cpp/` beside the `ml5d` executable, the executable's own directory, and
+   `<prefix>/lib/ml5/llama.cpp`
+3. `/usr/lib/ml5/llama.cpp`, `/usr/local/lib/ml5/llama.cpp`, `/opt/ml5/llama.cpp`
+4. `~/.ml5/backends` (Windows installer) and `~/.ml5/runtime/<kind>-b10687`
+   (downloaded by ML5)
+5. `PATH`
 
-### OpenAI-Compatible API (`/v1/*`)
+If none is found, the matching release archive is downloaded from GitHub on the
+first model load, checked against a pinned SHA-256, and unpacked to
+`~/.ml5/runtime`.
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/v1/chat/completions` | POST | OpenAI-style chat completion |
-| `/v1/completions` | POST | OpenAI-style text completion |
-| `/v1/embeddings` | POST | OpenAI-style embeddings |
-| `/v1/models` | GET | List models in OpenAI format |
-| `/v1/responses` | POST | OpenAI Responses API (Codex) |
+## Daemon options
 
-### Anthropic-Compatible API (`/v1/*`)
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/v1/messages` | POST | Anthropic Messages API |
-| `/v1/messages/count_tokens` | POST | Token counting |
-
-### Ollama-Compatible API (`/ollama/*`)
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/ollama/api/generate` | POST | Generate (Ollama shape) |
-| `/ollama/api/chat` | POST | Chat (Ollama shape) |
-| `/ollama/api/tags` | GET | List models |
-| `/ollama/api/show` | POST | Model info |
-| `/ollama/api/version` | GET | Version |
-| `/ollama/api/embeddings` | POST | Embeddings |
-| `/ollama/api/ps` | GET | Running models |
-
-## Model Formats
-
-| Format | Backend | Description |
-|--------|---------|-------------|
-| GGUF | llama.cpp | Quantized models (default) |
-| Safetensors | candle | Full HF models (Llama-family arch, feature-gated) |
-
-## Configuration
-
-### Daemon Options
-
-```powershell
+```sh
 ml5d --help
 ```
 
-Key options:
-- `--host` / `--port`: Bind address (default: `127.0.0.1:11435`)
-- `--models-dir`: Model storage directory (default: `~/.ml5/models`)
-- `--ctx-size`: Default context size (default: 2048)
-- `--gpu-layers`: GPU layers to offload (-1 for all, 0 for CPU only)
-- `--tensor-split`: Raw llama.cpp layer split ratios across GPUs/cluster nodes (e.g. `--tensor-split 0.5,0.5`)
-- `--rpc-nodes`: Raw llama.cpp RPC cluster workers (e.g. `--rpc-nodes node1:50052,node2:50052`); requires the ggml-rpc backend in `~/.ml5/backends`
-- `--max-memory-fraction`: Max memory usage before aborting load (default: 0.85)
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `--host`, `--port` | `127.0.0.1:11435` | Bind address |
+| `--models-dir` | `~/.ml5/models` | Model store (`$ML5_HOME/models` if set) |
+| `--llama-server` | auto | llama-server binary or directory |
+| `--ctx-size` | `0` (auto) | Context per slot; auto sizes from free memory |
+| `--auto-ctx-max` | `32768` | Ceiling for the automatic context size |
+| `--gpu-layers` | `auto` | `auto` fits to free VRAM, `all`, or a number (`0` = CPU) |
+| `--parallel [N]` | `1` | Concurrent requests per model; bare flag means 4 |
+| `--max-loaded-models` | `2` | Models kept loaded at once (LRU eviction) |
+| `--keep-alive` | `15m` | Idle unload delay (`30s`, `15m`, `2h`; `-1` = never) |
+| `--max-memory-fraction` | `0.85` | Share of RAM+VRAM a load may claim |
+| `--flash-attn` | `auto` | `auto`, `on`, `off` |
+| `--cache-type-k/-v` | `f16` | KV cache types (`q8_0` halves KV memory) |
+| `--no-kv-offload` | off | Keep the KV cache in system RAM |
+| `--batch-size`, `--ubatch-size` | `2048`, `512` | Prompt batch sizes |
+| `--threads`, `--threads-batch` | auto | CPU threads |
+| `--main-gpu`, `--tensor-split` | `0`, none | Multi-GPU placement |
+| `--rpc-nodes` | none | llama.cpp RPC workers (`host:port,...`) |
+| `--no-mmap`, `--mlock` | off | Memory mapping / pinning |
+| `--background`, `--stop` | | Detach as a background process / stop it |
 
-Build with `cargo build --release --features safetensors` for safetensors support via candle.
+Requests may override `n_ctx`, `n_gpu_layers`, `flash_attn`, `cache_type_k`,
+`cache_type_v`, and `keep_alive`; a model reloads only when a load-affecting value
+changes.
 
-### CLI Options
+## API
 
-```powershell
-ml5 --help
-```
+### Native (`/api/*`)
 
-Global options:
-- `--host`: Daemon address (default: `http://127.0.0.1:11435`)
-- `--quiet`: Suppress progress and status messages
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/chat` | POST | Chat (SSE with load/prompt-progress status events) |
+| `/api/generate` | POST | Raw completion |
+| `/api/embed` | POST | Embeddings |
+| `/api/models` | GET | Installed models with details and capabilities |
+| `/api/status` | GET | Daemon, runtime, memory, loaded models, pulls |
+| `/api/metrics` | GET | Compact counters (models, active requests, memory, pulls) |
+| `/api/load` | POST | Preload a model |
+| `/api/unload` | POST | Unload a model |
+| `/api/pull` | POST | Pull a model (SSE progress; re-attaches to a running pull) |
+| `/api/pulls` | GET | Pulls in progress |
+| `/api/pull/cancel` | POST | Cancel a pull by id |
+| `/api/delete` | DELETE | Delete a model |
+| `/api/rename` | POST | Set a friendly name |
+| `/api/rescan` | POST | Rescan the model store |
 
-## GPU Support
+### OpenAI-compatible (`/v1/*`)
 
-ML5 supports GPU acceleration via dynamic backend loading:
+`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`,
+`/v1/models/{id}`, `/v1/responses`.
 
-```powershell
-# Detect available GPUs
-ml5 backend detect
+### Anthropic-compatible (`/v1/*`)
 
-# Download recommended backend
-ml5 backend download
+`/v1/messages`, `/v1/messages/count_tokens` (exact counts from the model's
+tokenizer and template).
 
-# Run with GPU offload
-ml5d --gpu-layers -1  # All layers
-ml5d --gpu-layers 32  # Specific layer count
-```
+### Ollama-compatible (`/ollama/api/*`)
 
-**Note**: GPU support requires compatible llama.cpp backend libraries and a build with the `gpu` feature enabled.
+`generate`, `chat`, `tags`, `show`, `ps`, `version`, `embed`, `embeddings`, `pull`,
+`delete`, `copy` — NDJSON streaming, like Ollama.
 
-### Backend compatibility
+## Model formats
 
-- **CUDA** — NVIDIA GPUs with compute capability 7.5+ (RTX 20-series and newer).
-- **Vulkan** — the path for older NVIDIA cards. Pascal-era GPUs (GTX 10-series, e.g. GTX 1060/1080) can't use current CUDA builds, since llama.cpp upstream and NVIDIA dropped Pascal after CUDA 11.7. Vulkan gives full GPU offload on those cards.
-- **CPU** — no GPU; runs on the processor.
-
-Pick the installer matching your card. Older-NVIDIA users should use `ml5-installer-vulkan.exe`.
+| Format | Engine | Notes |
+|--------|--------|-------|
+| GGUF | llama-server | Single or split files, optional `mmproj` for vision |
+| Safetensors | candle | Llama-family architectures; build with `--features ml5d/safetensors` |
 
 ## Development
 
-### Running Tests
-
-```powershell
-# Run all tests
-cargo test --workspace
-
-# Run CLI tests only (no llama.cpp build required)
-cargo test -p ml5
-```
-
-### Building from Source
-
-```powershell
-# Debug build
-cargo build
-
-# Release build
-cargo build --release
-
-# Build specific crate
-cargo build -p ml5        # CLI only
-cargo build -p ml5d       # Daemon only
-cargo build -p ml5-core   # Core library only
-```
-
-### Code Quality
-
-```powershell
-# Format code
-cargo fmt
-
-# Run linter
+```sh
+cargo build --workspace
 cargo clippy --workspace --all-targets
-
-# Check without building
-cargo check --workspace
+cargo test --workspace
 ```
-
-## Current Limitations
-
-- **No benchmarking**: ML5 has not been benchmarked against Ollama or other inference engines
-- **Single worker**: Each model has one inference worker; contexts are rebuilt per request
-- **No KV cache reuse**: Prompt cache and continuous batching are not yet implemented
-- **No resumable downloads**: Interrupted downloads must restart from scratch
-- **Basic verification**: Downloads verify content length and GGUF magic, not cryptographic checksums
-- **Windows-focused**: Primary development target is Windows; Linux/macOS support is untested
-
-## Contributing
-
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT — see [LICENSE](LICENSE).
 
 ## Acknowledgments
 
-- Built on [llama.cpp](https://github.com/ggerganov/llama.cpp)
-- Inspired by [Ollama](https://ollama.ai/)
-- Uses [axum](https://github.com/tokio-rs/axum) for the web framework
+- [llama.cpp](https://github.com/ggml-org/llama.cpp)
+- [candle](https://github.com/huggingface/candle)
+- [axum](https://github.com/tokio-rs/axum)
+- Inspired by [Ollama](https://ollama.com/)

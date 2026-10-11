@@ -1,5 +1,6 @@
 use crate::config::ModelParams;
 use crate::error::Result;
+use crate::model::ModelInfo;
 use crate::types::*;
 use async_trait::async_trait;
 use futures::Stream;
@@ -7,19 +8,37 @@ use std::pin::Pin;
 
 pub type TokenStream = Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>;
 
+#[derive(Debug, Clone)]
+pub struct LoadSpec {
+    pub model: ModelInfo,
+    pub params: ModelParams,
+    pub n_parallel: usize,
+    pub embeddings: bool,
+}
+
 #[async_trait]
 pub trait Backend: Send + Sync {
     fn name(&self) -> &str;
 
     fn capabilities(&self) -> Vec<Capability>;
 
-    async fn load(&self, model_path: &std::path::Path, params: &ModelParams) -> Result<()>;
+    async fn load(&self, spec: &LoadSpec) -> Result<()>;
 
     async fn unload(&self) -> Result<()>;
+
+    async fn is_alive(&self) -> bool {
+        true
+    }
+
+    fn base_url(&self) -> Option<String> {
+        None
+    }
 
     async fn chat(&self, req: ChatRequest) -> Result<TokenStream>;
 
     async fn generate(&self, req: GenerateRequest) -> Result<TokenStream>;
 
     async fn embed(&self, req: EmbedRequest) -> Result<EmbedResponse>;
+
+    async fn count_tokens(&self, req: &ChatRequest) -> Result<u32>;
 }

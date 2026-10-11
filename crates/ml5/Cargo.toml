@@ -17,12 +17,12 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
-clap.workspace = true
+clap = { workspace = true, features = ["env"] }
 reqwest.workspace = true
 futures.workspace = true
 comfy-table = "7"
 indicatif = "0.17"
-dirs.workspace = true
-zip = "8.6.0"
+ml5-core = { path = "../ml5-core", default-features = false }
+base64 = "0.22"
 sha2 = "0.10"
 hex = "0.4"

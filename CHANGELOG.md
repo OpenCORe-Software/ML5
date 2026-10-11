@@ -5,6 +5,73 @@ All notable changes to ML5 will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-10-11
+
+### llama-server engine
+
+ML5 now runs GGUF models in llama.cpp's own `llama-server` (pinned release b10687,
+`--jinja`), one child process per loaded model, instead of in-process bindings.
+Builds no longer need CMake, libclang, or a C++ toolchain.
+
+### Added
+- Tool calling on every API: OpenAI `tools`/`tool_choice`/`parallel_tool_calls`,
+  Anthropic `tool_use`/`tool_result`, Ollama `tools`, and Responses
+  `function_call`/`function_call_output`, streamed in each API's native shape.
+- Vision through `mmproj` projectors: images on OpenAI, Anthropic, Ollama, Responses
+  and native requests. Pulls download the best projector (f16 > bf16 > q8_0 > f32)
+  next to the model and pair it automatically.
+- Reasoning output separated from the answer (`reasoning_content`, `thinking`
+  blocks, Responses reasoning items) with per-request `think`, `reasoning_effort`
+  and Anthropic `thinking` controls.
+- Structured output: `response_format` JSON mode / JSON schema, Ollama `format`,
+  Responses `text.format`.
+- KV-cache reuse on every API, reported as `cached_tokens` /
+  `cache_read_input_tokens`.
+- Several loaded models at once (`--max-loaded-models`, default 2) with LRU
+  eviction, per-request and default keep-alive (`--keep-alive 15m`, `-1` = never),
+  crash detection, and in-flight protection so a busy model is never evicted.
+- Automatic context size from free RAM/VRAM and the model's KV footprint
+  (`--ctx-size 0`, `--auto-ctx-max`), and `--gpu-layers auto|all|N` with
+  llama.cpp's fit-to-VRAM placement.
+- Runtime management: `llama-server` is located (`--llama-server`,
+  `ML5_LLAMA_SERVER`, beside the binary, `/usr/lib/ml5/llama.cpp`,
+  `~/.ml5/runtime`, `PATH`) or downloaded and SHA-256-verified on first use.
+- Pull improvements: resumable downloads, SHA-256 verification against Hugging
+  Face LFS hashes, split GGUF sets, `owner/repo:QUANT`, aggregate progress,
+  cancellation (`/api/pull/cancel`, `ml5 cancel`), listing (`/api/pulls`,
+  `ml5 pulls`), and re-attaching to a pull already in progress.
+- Model details from GGUF metadata: architecture, parameter size, quantization,
+  trained context, and capabilities (completion, embedding, tools, thinking,
+  vision) in `/api/models`, `/v1/models`, `/ollama/api/tags|show|ps`.
+- Endpoints: `/api/load`, `/api/rescan`, `/v1/models/{id}`, `/ollama/api/embed`.
+- Exact `/v1/messages/count_tokens` using the model's tokenizer and template.
+- CLI: `ml5 load`, `ml5 ps`, `ml5 pulls`, `ml5 cancel`, `--image`, `--think`,
+  `--keep-alive`, interactive `/think` and `/image`, dimmed reasoning output,
+  richer `list` and `status`, and `ml5 backend detect|status|download` for the
+  llama.cpp runtime.
+- Safetensors models use the repository's chat template and stream valid UTF-8.
+- `ml5d` features `safetensors` and `cuda`.
+
+### Changed
+- Linux installer sets `ml5d` up as a systemd **user** service
+  (`/usr/lib/systemd/user/ml5d.service`, enabled globally, lingering for the
+  installing user) and removes the old system unit.
+- Ollama `/ollama/api/pull` streams NDJSON like Ollama.
+- `ml5d` logs to the journal when run by systemd, binds before writing its pid
+  file, and on SIGTERM/Ctrl+C drains requests for up to 10 s and unloads models.
+- `ml5d --background`/`--stop` work on Linux and macOS (previously Windows only).
+- `--parallel N` maps to llama-server slots with continuous batching.
+
+### Removed
+- In-process llama.cpp bindings and the `gpu`/`vulkan`/`cpu` build features.
+- `--manual-kv`/`--auto-kv` and the per-request `cache` flag; prompt caching is
+  always on.
+
+### Fixed
+- Deleting a safetensors model removes its directory.
+- Safetensors load failures are reported instead of appearing to succeed.
+- Native `/api/models` includes `friendly_name`.
+
 ## [0.2.3] - 2026-09-30
 
 ### Multi-node support for GGUF

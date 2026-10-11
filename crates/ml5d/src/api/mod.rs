@@ -1,10 +1,12 @@
 pub mod anthropic;
+pub mod common;
 pub mod native;
 pub mod ollama;
 pub mod openai;
 pub mod responses;
 
 use crate::state::AppState;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
@@ -19,6 +21,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/embed", post(native::embed))
         .route("/api/models", get(native::list_models))
         .route("/api/pull", post(native::pull))
+        .route("/api/pulls", get(native::list_pulls))
+        .route("/api/pull/cancel", post(native::cancel_pull))
+        .route("/api/load", post(native::load_model))
+        .route("/api/rescan", post(native::rescan))
         .route("/api/delete", delete(native::delete_model))
         .route("/api/unload", post(native::unload_model))
         .route("/api/rename", post(native::rename_model))
@@ -28,6 +34,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/completions", post(openai::completions))
         .route("/v1/embeddings", post(openai::embeddings))
         .route("/v1/models", get(openai::list_models))
+        .route("/v1/models/{*id}", get(openai::get_model))
         .route("/v1/responses", post(responses::responses))
         .route("/v1/messages", post(anthropic::messages))
         .route("/v1/messages/count_tokens", post(anthropic::count_tokens))
@@ -37,10 +44,12 @@ pub fn router(state: AppState) -> Router {
         .route("/ollama/api/show", post(ollama::show))
         .route("/ollama/api/version", get(ollama::version))
         .route("/ollama/api/embeddings", post(ollama::embeddings))
+        .route("/ollama/api/embed", post(ollama::embed))
         .route("/ollama/api/ps", get(ollama::ps))
         .route("/ollama/api/pull", post(ollama::pull))
         .route("/ollama/api/delete", delete(ollama::delete))
         .route("/ollama/api/copy", post(ollama::copy))
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -70,6 +79,10 @@ th{color:#8af}
 <tr><td>POST</td><td><code>/api/embed</code></td><td class="m">Embeddings</td></tr>
 <tr><td>GET</td><td><code>/api/models</code></td><td class="m">List installed models</td></tr>
 <tr><td>POST</td><td><code>/api/pull</code></td><td class="m">Pull a model (SSE progress)</td></tr>
+<tr><td>GET</td><td><code>/api/pulls</code></td><td class="m">Downloads in progress</td></tr>
+<tr><td>POST</td><td><code>/api/pull/cancel</code></td><td class="m">Cancel a download by id</td></tr>
+<tr><td>POST</td><td><code>/api/load</code></td><td class="m">Load a model into memory</td></tr>
+<tr><td>POST</td><td><code>/api/rescan</code></td><td class="m">Rescan the model store</td></tr>
 <tr><td>DELETE</td><td><code>/api/delete</code></td><td class="m">Delete a model</td></tr>
 <tr><td>POST</td><td><code>/api/unload</code></td><td class="m">Unload a model from memory</td></tr>
 <tr><td>POST</td><td><code>/api/rename</code></td><td class="m">Rename a model's friendly name</td></tr>
@@ -80,7 +93,7 @@ th{color:#8af}
 <h2>Model Formats</h2>
 <table>
 <tr><th>Format</th><th>Backend</th><th>Description</th></tr>
-<tr><td>GGUF</td><td><code>llama.cpp</code></td><td class="m">Quantized models (default)</td></tr>
+<tr><td>GGUF</td><td><code>llama-server</code></td><td class="m">Quantized models with tools, vision (mmproj) and reasoning</td></tr>
 <tr><td>Safetensors</td><td><code>candle</code></td><td class="m">Full HF models (Llama-family arch)</td></tr>
 </table>
 
@@ -109,7 +122,11 @@ th{color:#8af}
 <tr><td>GET</td><td><code>/ollama/api/tags</code></td><td class="m">List models</td></tr>
 <tr><td>POST</td><td><code>/ollama/api/show</code></td><td class="m">Model info</td></tr>
 <tr><td>GET</td><td><code>/ollama/api/version</code></td><td class="m">Version</td></tr>
-<tr><td>POST</td><td><code>/ollama/api/embeddings</code></td><td class="m">Embeddings</td></tr>
+<tr><td>POST</td><td><code>/ollama/api/embeddings</code></td><td class="m">Embeddings (legacy)</td></tr>
+<tr><td>POST</td><td><code>/ollama/api/embed</code></td><td class="m">Embeddings</td></tr>
+<tr><td>POST</td><td><code>/ollama/api/pull</code></td><td class="m">Pull (NDJSON progress)</td></tr>
+<tr><td>DELETE</td><td><code>/ollama/api/delete</code></td><td class="m">Delete a model</td></tr>
+<tr><td>POST</td><td><code>/ollama/api/copy</code></td><td class="m">Copy a model</td></tr>
 <tr><td>GET</td><td><code>/ollama/api/ps</code></td><td class="m">Running models</td></tr>
 </table>
 

@@ -2,7 +2,7 @@
 # CORe ML5 installer for Linux.
 # - Downloads ml5/ml5d from the latest GitHub release
 # - Installs to $PREFIX/bin (default /usr/local/bin)
-# - Registers ml5d as a service (systemd, OpenRC, runit, or sysvinit)
+# - Registers ml5d as a service (systemd user service, OpenRC, runit, or sysvinit)
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/OpenCORe-Software/ML5/master/install-linux.sh | sudo sh
 #   sudo sh install.sh [--prefix DIR] [--no-service] [--version TAG] [--user NAME]
@@ -74,26 +74,48 @@ LOG_DIR="$HOME_DIR/.ml5/logs"
 mkdir -p "$LOG_DIR"
 chown -R "$SERVICE_USER":"$SERVICE_USER" "$HOME_DIR/.ml5" 2>/dev/null || true
 
+user_systemctl() {
+    uid="$(id -u "$SERVICE_USER")"
+    runuser -u "$SERVICE_USER" -- env XDG_RUNTIME_DIR="/run/user/$uid" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" systemctl --user "$@"
+}
+
 install_systemd() {
-    cat > /etc/systemd/system/ml5d.service <<EOF
+    if [ -f /etc/systemd/system/ml5d.service ]; then
+        systemctl disable --now ml5d.service 2>/dev/null || true
+        rm -f /etc/systemd/system/ml5d.service
+        systemctl daemon-reload
+        info "Removed the old system-wide ml5d.service."
+    fi
+    mkdir -p /usr/lib/systemd/user
+    cat > /usr/lib/systemd/user/ml5d.service <<EOF
 [Unit]
 Description=CORe ML5 inference daemon
 After=network-online.target
-Wants=network-online.target
 
 [Service]
 Type=simple
-User=$SERVICE_USER
 ExecStart=$BINDIR/ml5d
 Restart=on-failure
 RestartSec=3
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
 EOF
-    systemctl daemon-reload
-    systemctl enable --now ml5d.service
-    ok "systemd service 'ml5d' enabled and started."
+    systemctl --global enable ml5d.service
+    ok "User service 'ml5d' enabled for every user."
+    loginctl enable-linger "$SERVICE_USER"
+    uid="$(id -u "$SERVICE_USER")"
+    i=0
+    while [ ! -S "/run/user/$uid/bus" ] && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
+    if [ -S "/run/user/$uid/bus" ]; then
+        user_systemctl daemon-reload
+        user_systemctl restart ml5d.service
+        ok "ml5d started for $SERVICE_USER (lingering enabled, so it also runs without a login)."
+    else
+        warn "The user manager for $SERVICE_USER is not up yet; ml5d starts at their next login or reboot."
+    fi
+    info "Manage it as $SERVICE_USER with: systemctl --user status ml5d"
 }
 
 install_openrc() {

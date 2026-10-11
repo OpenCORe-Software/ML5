@@ -278,8 +278,13 @@ fn llama_backend_url(b: Backend) -> (&'static str, String) {
 }
 
 fn llama_extra_urls(b: Backend) -> Vec<String> {
-    let _ = b;
-    Vec::new()
+    match b {
+        Backend::Cuda => vec![format!(
+            "https://github.com/ggml-org/llama.cpp/releases/download/{}/cudart-llama-bin-win-cuda-12.4-x64.zip",
+            LLAMA_RELEASE
+        )],
+        Backend::Vulkan | Backend::Cpu => Vec::new(),
+    }
 }
 
 async fn download_with_progress(client: &reqwest::Client, url: &str, label: &str) -> Result<Vec<u8>> {
@@ -402,6 +407,8 @@ fn add_to_user_path(dir: &Path) -> Result<()> {
             .args(["-NoProfile", "-Command", &script])
             .output()?;
     }
+    #[cfg(not(windows))]
+    let _ = dir;
     Ok(())
 }
 
