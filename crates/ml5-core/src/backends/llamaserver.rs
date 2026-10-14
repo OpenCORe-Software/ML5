@@ -636,7 +636,25 @@ impl Backend for LlamaServerBackend {
         if let Ok(mut b) = self.base.write() {
             *b = Some(format!("http://127.0.0.1:{port}"));
         }
-        tracing::info!(model = %spec.model.name, port, "llama-server ready");
+		let output = std::fs::read(&log_path)
+			.map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+			.unwrap_or_default();
+		let offloaded = output.lines().rev().find_map(|line| {
+			let (_, rest) = line.split_once("offloaded ")?;
+			let (count, _) = rest.split_once('/')?;
+			count.parse::<u32>().ok()
+		});
+		if spec.params.n_gpu_layers.uses_gpu()
+			&& (offloaded == Some(0) || (offloaded.is_none() && output.contains("no usable GPU found")))
+		{
+			tracing::warn!(
+				model = %spec.model.name,
+				server = %server.display(),
+				log = %log_path.display(),
+				"no model layers were offloaded to the GPU; check the runtime's GPU drivers and available VRAM, or lower the context size"
+			);
+		}
+		tracing::info!(model = %spec.model.name, port, gpu_layers_offloaded = ?offloaded, log = %log_path.display(), "llama-server ready");
         Ok(())
     }
 

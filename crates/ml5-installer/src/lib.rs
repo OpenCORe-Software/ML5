@@ -104,20 +104,22 @@ fn detect_gpus() -> Vec<GpuInfo> {
         .output()
     {
         if o.status.success() {
-            for line in String::from_utf8_lossy(&o.stdout).lines() {
-                let line = line.trim();
-                if line.is_empty()
-                    || line.to_lowercase().contains("nvidia")
-                    || out.iter().any(|g| g.name == line)
-                {
-                    continue;
-                }
-                out.push(GpuInfo {
-                    name: line.to_string(),
-                    is_nvidia: false,
-                    nvidia_cc: None,
-                });
-            }
+			let known = out.iter().any(|g| g.is_nvidia);
+			for line in String::from_utf8_lossy(&o.stdout).lines() {
+				let line = line.trim();
+				let nvidia = line.to_ascii_lowercase().contains("nvidia");
+				if line.is_empty()
+					|| (nvidia && known)
+					|| out.iter().any(|g| g.name.eq_ignore_ascii_case(line))
+				{
+					continue;
+				}
+				out.push(GpuInfo {
+					name: line.to_string(),
+					is_nvidia: nvidia,
+					nvidia_cc: None,
+				});
+			}
         }
     }
     out
@@ -413,6 +415,7 @@ fn add_to_user_path(dir: &Path) -> Result<()> {
 }
 
 async fn install(backend: Backend, yes: bool) -> Result<()> {
+	let mut backend = backend;
     let existing = read_marker();
     let installed = is_installed();
 
@@ -461,6 +464,7 @@ async fn install(backend: Backend, yes: bool) -> Result<()> {
             }
             ExistingAction::Repair => {
                 println!("Repairing {existing_label} install...");
+				backend = existing.unwrap_or(backend);
             }
             ExistingAction::Swap => {
                 println!(
@@ -485,23 +489,57 @@ async fn install(backend: Backend, yes: bool) -> Result<()> {
     fetch_binary(&client, "ml5.exe", &bindir).await?;
     fetch_binary(&client, "ml5d.exe", &bindir).await?;
 
-    let (_, url) = llama_backend_url(backend);
-    println!("Downloading llama.cpp {} backend...", backend.label());
-    let zip_data = download_with_progress(&client, &url, "backend").await?;
-    extract_backend_zip(&zip_data, &backends_dir())?;
-
-    for extra in llama_extra_urls(backend) {
-        println!("Downloading runtime support archive...");
-        let data = download_with_progress(&client, &extra, "runtime").await?;
-        extract_backend_zip(&data, &backends_dir())?;
-    }
-
-    for core in ["llama.dll", "ggml.dll", "ggml-base.dll", "libomp.dll"] {
-        let src = backends_dir().join(core);
-        if src.exists() {
-            let _ = std::fs::copy(&src, bindir.join(core));
-        }
-    }
+	let backends = backends_dir();
+	let staging = backends.with_extension(format!("staging-{}", std::process::id()));
+	let backup = backends.with_extension(format!("backup-{}", std::process::id()));
+	if staging.exists() || backup.exists() {
+		bail!("backend staging or backup directory already exists; preserve or move it before retrying: {} / {}", staging.display(), backup.display());
+	}
+	std::fs::create_dir_all(backends.parent().context("backend directory has no parent")?)?;
+	std::fs::create_dir(&staging)?;
+	let result: Result<()> = async {
+		let (_, url) = llama_backend_url(backend);
+		println!("Downloading llama.cpp {} backend...", backend.label());
+		let data = download_with_progress(&client, &url, "backend").await?;
+		extract_backend_zip(&data, &staging)?;
+		for extra in llama_extra_urls(backend) {
+			println!("Downloading runtime support archive...");
+			let data = download_with_progress(&client, &extra, "runtime").await?;
+			extract_backend_zip(&data, &staging)?;
+		}
+		let library = match backend {
+			Backend::Cuda => Some("ggml-cuda.dll"),
+			Backend::Vulkan => Some("ggml-vulkan.dll"),
+			Backend::Cpu => None,
+		};
+		for name in ["llama-server.exe", "llama.dll", "ggml.dll", "ggml-base.dll"].into_iter().chain(library) {
+			if !staging.join(name).is_file() {
+				bail!("downloaded {} runtime is missing {name}", backend.label());
+			}
+		}
+		let previous = backends.exists();
+		if previous {
+			std::fs::rename(&backends, &backup).context("cannot move the old backend; close running ML5 processes and retry")?;
+		}
+		if let Err(error) = std::fs::rename(&staging, &backends) {
+			if previous {
+				std::fs::rename(&backup, &backends).with_context(|| format!("cannot restore the previous backend from {} after installation failed: {error}", backup.display()))?;
+			}
+			return Err(error).context("cannot activate the downloaded backend");
+		}
+		if previous {
+			if let Err(error) = std::fs::remove_dir_all(&backup) {
+				eprintln!("[ml5] backend installed; could not remove old backend at {}: {error}", backup.display());
+			}
+		}
+		Ok(())
+	}.await;
+	if staging.exists() {
+		if let Err(error) = std::fs::remove_dir_all(&staging) {
+			eprintln!("[ml5] could not remove backend staging directory {}: {error}", staging.display());
+		}
+	}
+	result?;
 
     write_marker(backend)?;
     std::fs::create_dir_all(models_dir())?;

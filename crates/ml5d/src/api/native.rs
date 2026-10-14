@@ -291,6 +291,7 @@ pub async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
             let loaded = loaded_contexts.get(&m.name);
             json!({
                 "name": m.name,
+				"path": m.path,
                 "friendly_name": m.friendly_name,
                 "display_name": m.display_name(),
                 "size_bytes": m.size_bytes,

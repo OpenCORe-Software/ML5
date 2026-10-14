@@ -174,6 +174,7 @@ pub struct Config {
     pub host: String,
     pub port: u16,
     pub models_dir: PathBuf,
+	pub extra_model_dirs: Vec<PathBuf>,
     pub keep_alive_secs: i64,
     pub max_loaded_models: usize,
     pub model: ModelParams,
@@ -189,6 +190,7 @@ impl Default for Config {
             host: "127.0.0.1".into(),
             port: 11435,
             models_dir: Self::models_dir_default(),
+			extra_model_dirs: Vec::new(),
             keep_alive_secs: 900,
             max_loaded_models: 2,
             model: ModelParams::default(),
@@ -202,6 +204,9 @@ impl Default for Config {
 
 impl Config {
     pub fn validate(&self) -> crate::Result<()> {
+		if self.model_dirs().iter().any(|path| path.as_os_str().is_empty()) {
+			return Err(crate::error::Ml5Error::InvalidRequest("model directories must not be empty".into()));
+		}
         crate::types::RequestOverrides {
             n_ctx: Some(self.model.n_ctx),
             n_batch: Some(self.model.n_batch),
@@ -239,6 +244,16 @@ impl Config {
     pub fn models_dir_default() -> PathBuf {
         Self::ml5_home().join("models")
     }
+
+	pub fn model_dirs(&self) -> Vec<PathBuf> {
+		let mut dirs = vec![self.models_dir.clone()];
+		for dir in &self.extra_model_dirs {
+			if !dirs.contains(dir) {
+				dirs.push(dir.clone());
+			}
+		}
+		dirs
+	}
 
     pub fn log_dir(&self) -> PathBuf {
         self.models_dir

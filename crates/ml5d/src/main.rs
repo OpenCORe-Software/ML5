@@ -19,8 +19,8 @@ struct Args {
     #[arg(long, default_value_t = 11435)]
     port: u16,
 
-    #[arg(long, help = "Model store (default ~/.ml5/models, or $ML5_HOME/models)")]
-    models_dir: Option<std::path::PathBuf>,
+	#[arg(long, help = "Model directory; repeat to combine stores across drives. The first receives downloads (default ~/.ml5/models, or $ML5_HOME/models)")]
+	models_dir: Vec<std::path::PathBuf>,
 
     #[arg(long, help = "Detach and run in the background (no console needed)")]
     background: bool,
@@ -145,9 +145,10 @@ fn build_config(args: &Args) -> anyhow::Result<Config> {
         port: args.port,
         ..Default::default()
     };
-    if let Some(dir) = &args.models_dir {
-        config.models_dir = dir.clone();
-    }
+	if let Some(dir) = args.models_dir.first() {
+		config.models_dir = dir.clone();
+		config.extra_model_dirs = args.models_dir.iter().skip(1).cloned().collect();
+	}
     let m = &mut config.model;
     if let Some(v) = args.ctx_size {
         m.n_ctx = v;
@@ -316,6 +317,9 @@ async fn main() -> anyhow::Result<()> {
             format!("{}s", config.keep_alive_secs)
         }
     );
+	for dir in &config.extra_model_dirs {
+		eprintln!("Additional model directory: {}", dir.display());
+	}
     match runtime {
         Some(p) => eprintln!("llama-server: {}", p.display()),
         None => eprintln!(

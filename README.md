@@ -113,16 +113,24 @@ order and uses the first one found:
 
 1. `ml5d --llama-server PATH`, then the `ML5_LLAMA_SERVER` environment variable
    (a binary or a directory containing one)
-2. `llama.cpp/` beside the `ml5d` executable, the executable's own directory, and
+2. `~/.ml5/backends` on Windows (the backend selected by the installer)
+3. `llama.cpp/` beside the `ml5d` executable and
    `<prefix>/lib/ml5/llama.cpp`
-3. `/usr/lib/ml5/llama.cpp`, `/usr/local/lib/ml5/llama.cpp`, `/opt/ml5/llama.cpp`
-4. `~/.ml5/backends` (Windows installer) and `~/.ml5/runtime/<kind>-b10687`
+4. `/usr/lib/ml5/llama.cpp`, `/usr/local/lib/ml5/llama.cpp`, `/opt/ml5/llama.cpp`
+5. The executable's own directory, then `~/.ml5/backends` on other platforms
+6. `~/.ml5/runtime/<kind>-b10687`
    (downloaded by ML5)
-5. `PATH`
+7. `PATH`
 
 If none is found, the matching release archive is downloaded from GitHub on the
 first model load, checked against a pinned SHA-256, and unpacked to
 `~/.ml5/runtime`.
+
+The daemon log records the number of model layers actually offloaded, when
+reported by llama.cpp, and warns if GPU offload was requested but no layers were
+offloaded. The full runtime log is `~/.ml5/logs/llama-server-<model>.log` with the
+default model directory. Check this log for GPU initialization errors when
+troubleshooting a CPU-only load.
 
 ## Daemon options
 
@@ -133,7 +141,7 @@ ml5d --help
 | Option | Default | Meaning |
 |--------|---------|---------|
 | `--host`, `--port` | `127.0.0.1:11435` | Bind address |
-| `--models-dir` | `~/.ml5/models` | Model store (`$ML5_HOME/models` if set) |
+| `--models-dir` | `~/.ml5/models` | Repeat for multiple drives; the first directory receives downloads (`$ML5_HOME/models` if set) |
 | `--llama-server` | auto | llama-server binary or directory |
 | `--ctx-size` | `0` (auto) | Context per slot; auto sizes from free memory |
 | `--auto-ctx-max` | `32768` | Ceiling for the automatic context size |
@@ -160,6 +168,41 @@ Requests may override `n_ctx`, `n_gpu_layers`, `flash_attn`, `cache_type_k`,
 changes. With `--opt-cache-prompt`, requests on the native and OpenAI
 chat/completions endpoints opt in to prompt caching with `cache_prompt: true`
 (CLI: `--cache-prompt`).
+
+### Models on multiple drives
+
+Repeat `--models-dir` to combine existing model stores in `ml5 list` and every
+API's model list. For example, in Windows PowerShell:
+
+```powershell
+ml5d --background --models-dir "$env:USERPROFILE\.ml5\models" --models-dir "D:\.ml5\models" --models-dir "E:\.ml5\models"
+```
+
+The first directory is the primary store for downloads, daemon logs, and the PID
+file. Additional directories are scanned in the supplied order without copying
+models or creating directories on those drives. Each store supports the same
+GGUF, split GGUF, projector, and safetensors layouts as the primary store.
+Models load directly from their original drive; rename and delete operations
+also apply to that original location.
+
+If two stores contain the same model name, the first keeps its name and the later
+copy gets a name such as `store2/model-name` (with a numeric suffix on the store
+prefix if needed to avoid another collision). Repeated paths and symlink aliases
+to the same model are listed only once. An unavailable additional drive is
+skipped with a log warning; run `ml5 rescan` after reconnecting it. `ml5 status`
+and `/api/status` show the configured directories, and `/api/models` includes each
+model's path.
+
+Use the exact listed model ID if a friendly name matches more than one model.
+
+### Batching and CPU threads
+
+Continuous batching is enabled in llama-server. `--parallel` controls the number
+of simultaneous request slots and defaults to one; `--max-loaded-models` is only
+a limit, not a reservation of memory for unloaded models. More slots require
+more total context memory. Automatic CPU thread selection uses llama.cpp's
+physical-core-oriented default, so six threads on a six-core/twelve-thread CPU
+is expected; `--threads 12 --threads-batch 12` explicitly selects twelve.
 
 ## API
 

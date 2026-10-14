@@ -182,6 +182,7 @@ pub struct EngineStatus {
     pub pulls: Vec<PullState>,
     pub uptime_secs: u64,
     pub models_dir: String,
+	pub model_dirs: Vec<String>,
     pub log_dir: String,
     pub defaults: ModelParams,
     pub max_loaded_models: usize,
@@ -281,13 +282,58 @@ impl Engine {
     }
 
     pub async fn scan_models(&self) -> Result<()> {
-        let root = self.config.models_dir.clone();
+		let roots = self.config.model_dirs();
         let cache = self
             .gguf_cache
             .lock()
             .map(|c| c.clone())
             .unwrap_or_default();
-        let (models, cache) = tokio::task::spawn_blocking(move || scan_store(&root, cache))
+		let (models, cache) = tokio::task::spawn_blocking(move || {
+			let mut stores = Vec::new();
+			let mut next_cache = GgufCache::new();
+			let mut directories = HashSet::new();
+			let mut paths = HashSet::new();
+			for (index, root) in roots.iter().enumerate() {
+				let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+				if !directories.insert(canonical) {
+					continue;
+				}
+				let (found, updated) = match scan_store(root, &cache) {
+					Ok(scanned) => scanned,
+					Err(error) if index > 0 => {
+						tracing::warn!(path = %root.display(), %error, "could not scan additional model directory; rescan after the drive becomes available");
+						continue;
+					}
+					Err(error) => return Err(error),
+				};
+				next_cache.extend(updated);
+				let mut found: Vec<ModelInfo> = found.into_values().collect();
+				found.sort_by(|a, b| a.name.cmp(&b.name));
+				for info in found {
+					let canonical = std::fs::canonicalize(&info.path).unwrap_or_else(|_| info.path.clone());
+					if paths.insert(canonical) {
+						stores.push((index + 1, info));
+					}
+				}
+			}
+			let reserved: HashSet<String> = stores.iter().map(|(_, info)| info.name.clone()).collect();
+			let mut models = HashMap::new();
+			for (store, mut info) in stores {
+				if models.contains_key(&info.name) {
+					let original = info.name.clone();
+					let mut alias = format!("store{store}/{original}");
+					let mut suffix = 2;
+					while models.contains_key(&alias) || reserved.contains(&alias) {
+						alias = format!("store{store}-{suffix}/{original}");
+						suffix += 1;
+					}
+					tracing::warn!(model = %original, alias = %alias, path = %info.path.display(), "duplicate model name across stores; using a distinct name");
+					info.name = alias;
+				}
+				models.insert(info.name.clone(), info);
+			}
+			Ok::<_, Ml5Error>((models, next_cache))
+		})
             .await
             .map_err(|e| Ml5Error::Backend(format!("model scan task failed: {e}")))??;
         if let Ok(mut c) = self.gguf_cache.lock() {
@@ -329,15 +375,18 @@ impl Engine {
                 .collect()
         };
         let target = normalize(candidates[1]);
-        if let Some(info) = models.values().find(|m| normalize(&m.name) == target) {
-            return Ok(info.clone());
-        }
-        if let Some(info) = models
-            .values()
-            .find(|m| m.friendly_name.as_deref().is_some_and(|f| normalize(f) == target))
-        {
-            return Ok(info.clone());
-        }
+		let mut matches: Vec<&ModelInfo> = models.values().filter(|m| normalize(&m.name) == target).collect();
+		if matches.is_empty() {
+			matches = models.values().filter(|m| m.friendly_name.as_deref().is_some_and(|f| normalize(f) == target)).collect();
+		}
+		if matches.len() == 1 {
+			return Ok(matches[0].clone());
+		}
+		if matches.len() > 1 {
+			let mut names: Vec<&str> = matches.iter().map(|m| m.name.as_str()).collect();
+			names.sort_unstable();
+			return Err(Ml5Error::InvalidRequest(format!("model name '{name}' is ambiguous; use an exact name from `ml5 list`: {}", names.join(", "))));
+		}
         Err(Ml5Error::ModelNotFound(format!(
             "{name}. Run `ml5 list` for installed names or `ml5 pull hf:owner/repo` to download one."
         )))
@@ -366,7 +415,12 @@ impl Engine {
     pub async fn delete_model(&self, name: &str) -> Result<()> {
         let _guard = self.lifecycle.lock().await;
         let info = self.get_model(name).await?;
-        self.remove_loaded(&info.name, true).await?;
+		let loaded: Vec<String> = self.loaded.read().await.values()
+			.filter(|m| m.info.name == info.name || m.info.path == info.path)
+			.map(|m| m.info.name.clone()).collect();
+		for name in loaded {
+			self.remove_loaded(&name, true).await?;
+		}
         match info.model_type {
             ModelType::Safetensors => tokio::fs::remove_dir_all(&info.path).await?,
             ModelType::Gguf => {
@@ -495,6 +549,7 @@ impl Engine {
             pulls: self.list_pulls().await,
             uptime_secs: self.started.elapsed().as_secs(),
             models_dir: self.config.models_dir.display().to_string(),
+			model_dirs: self.config.model_dirs().iter().map(|p| p.display().to_string()).collect(),
             log_dir: self.config.log_dir().display().to_string(),
             defaults: self.config.model.clone(),
             max_loaded_models: self.config.max_loaded_models,
@@ -522,17 +577,19 @@ impl Engine {
     }
 
     pub async fn loaded_contexts(&self) -> HashMap<String, u32> {
+		let models = self.models.read().await;
         self.loaded
             .read()
             .await
             .values()
+			.filter(|m| models.get(&m.info.name).is_some_and(|info| info.path == m.info.path))
             .map(|m| (m.info.name.clone(), m.params.n_ctx))
             .collect()
     }
 
     pub async fn is_loaded(&self, name: &str) -> bool {
         match self.get_model(name).await {
-            Ok(info) => self.loaded.read().await.contains_key(&info.name),
+			Ok(info) => self.loaded.read().await.get(&info.name).is_some_and(|m| m.info.path == info.path),
             Err(_) => false,
         }
     }
@@ -660,7 +717,7 @@ impl Engine {
             let loaded = self.loaded.read().await;
             loaded
                 .get(&info.name)
-                .filter(|m| Self::compatible(m, &wanted, overrides, embeddings))
+				.filter(|m| m.info.path == info.path && Self::compatible(m, &wanted, overrides, embeddings))
                 .map(|m| ActiveGuard::new(m.clone()))
         };
         if let Some(guard) = fast {
@@ -676,7 +733,7 @@ impl Engine {
         let existing = self.loaded.read().await.get(&info.name).cloned();
         if let Some(m) = existing {
             let alive = m.backend.is_alive().await;
-            if alive && Self::compatible(&m, &wanted, overrides, embeddings) {
+			if alive && m.info.path == info.path && Self::compatible(&m, &wanted, overrides, embeddings) {
                 let guard = ActiveGuard::new(m);
                 if let Some(k) = keep_alive {
                     guard.keep_alive.store(k, Ordering::Relaxed);
@@ -687,7 +744,7 @@ impl Engine {
                 let mut loaded = self.loaded.write().await;
                 if alive && m.active_requests() > 0 {
                     return Err(Ml5Error::InvalidRequest(format!(
-                        "Model '{}' is serving other requests with different load settings (context, GPU layers, KV cache, or embedding mode); retry when they finish.",
+						"Model '{}' is serving other requests from a different file or with different load settings (context, GPU layers, KV cache, or embedding mode); retry when they finish.",
                         info.name
                     )));
                 }
@@ -938,7 +995,7 @@ fn modified(meta: &std::fs::Metadata) -> Option<chrono::DateTime<chrono::Utc>> {
 
 fn scan_store(
     root: &Path,
-    old_cache: GgufCache,
+	old_cache: &GgufCache,
 ) -> Result<(HashMap<String, ModelInfo>, GgufCache)> {
     let mut models = HashMap::new();
     let mut cache = GgufCache::new();
@@ -985,12 +1042,12 @@ fn scan_store(
             .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("gguf"))
             .collect();
         if !ggufs.is_empty() {
-            for info in gguf_group(&path, &ggufs, Some(&dir_name), &old_cache, &mut cache) {
+            for info in gguf_group(&path, &ggufs, Some(&dir_name), old_cache, &mut cache) {
                 models.insert(info.name.clone(), info);
             }
         }
     }
-    for info in gguf_group(root, &root_ggufs, None, &old_cache, &mut cache) {
+    for info in gguf_group(root, &root_ggufs, None, old_cache, &mut cache) {
         models.insert(info.name.clone(), info);
     }
     Ok((models, cache))

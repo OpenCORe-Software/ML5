@@ -125,24 +125,33 @@ pub fn detect_gpus() -> Vec<GpuDevice> {
             ])
             .output()
         {
-            for line in String::from_utf8_lossy(&o.stdout).lines() {
-                let line = line.trim();
-                let lower = line.to_ascii_lowercase();
-                if line.is_empty() || lower.contains("nvidia") {
-                    continue;
-                }
-                let vendor = if lower.contains("amd") || lower.contains("radeon") {
-                    "AMD"
-                } else if lower.contains("intel") {
-                    "Intel"
-                } else {
-                    continue;
-                };
-                out.push(GpuDevice {
-                    vendor: vendor.into(),
-                    name: line.to_string(),
-                });
-            }
+			if !o.status.success() {
+				return out;
+			}
+			let nvidia = out.iter().any(|g| g.vendor == "NVIDIA");
+			for line in String::from_utf8_lossy(&o.stdout).lines() {
+				let line = line.trim();
+				let lower = line.to_ascii_lowercase();
+				if line.is_empty() || out.iter().any(|g| g.name.eq_ignore_ascii_case(line)) {
+					continue;
+				}
+				let vendor = if lower.contains("nvidia") {
+					if nvidia {
+						continue;
+					}
+					"NVIDIA"
+				} else if lower.contains("amd") || lower.contains("radeon") {
+					"AMD"
+				} else if lower.contains("intel") {
+					"Intel"
+				} else {
+					continue;
+				};
+				out.push(GpuDevice {
+					vendor: vendor.into(),
+					name: line.to_string(),
+				});
+			}
         }
     }
     out
@@ -168,7 +177,12 @@ pub fn vulkan_loader_present() -> bool {
     }
     #[cfg(windows)]
     {
-        Path::new(r"C:\Windows\System32\vulkan-1.dll").exists()
+		std::env::var_os("SystemRoot")
+			.map(PathBuf::from)
+			.unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+			.join("System32")
+			.join("vulkan-1.dll")
+			.is_file()
     }
     #[cfg(target_os = "macos")]
     {
@@ -356,6 +370,8 @@ pub fn runtime_install_dir(kind: GpuKind) -> PathBuf {
 
 pub fn candidate_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
+	#[cfg(windows)]
+	dirs.push(backends_dir());
     let mut exe_dir = None;
     if let Ok(exe) = std::env::current_exe() {
         let exe = std::fs::canonicalize(&exe).unwrap_or(exe);

@@ -5,6 +5,28 @@ All notable changes to ML5 will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-10-14
+
+### Added
+- Repeat `ml5d --models-dir` to combine model stores from multiple drives in every
+  model list. The first directory remains the download destination. Duplicate
+  model names receive distinct store-prefixed names, repeated locations are
+  deduplicated, and unavailable additional drives can be reconnected and rescanned.
+- Status output lists all model directories; native model listings include each
+  model's original path.
+- `ml5 rescan` refreshes every configured model directory without restarting the
+  daemon, including drives reconnected after startup.
+
+### Fixed
+- Windows GPU detection now finds NVIDIA cards even when `nvidia-smi` is
+  unavailable, and locates the Vulkan loader using the Windows system directory.
+- Windows prefers the installer's selected runtime over other bundled runtimes.
+  Backend repair and swaps replace the runtime as a complete set, preventing
+  stale CUDA, Vulkan, or CPU libraries from mixing. Repair preserves the existing
+  backend selection.
+- Daemon logs show the actual GPU layer count reported by llama.cpp and warn
+  when requested GPU offload loads no model layers onto the GPU.
+
 ## [0.3.2] - 2026-10-14
 
 ### Added

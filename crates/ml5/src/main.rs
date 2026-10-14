@@ -96,6 +96,9 @@ enum Cmd {
     #[command(about = "List installed models")]
     List,
 
+	#[command(about = "Rescan all configured model directories, including reconnected drives")]
+	Rescan,
+
     #[command(about = "Show daemon status")]
     Status {
         #[arg(long, help = "Print the full machine-readable status")]
@@ -797,6 +800,10 @@ async fn main() -> Result<()> {
             }
             println!("{table}");
         }
+		Cmd::Rescan => {
+			let resp: serde_json::Value = checked_response(client.post(format!("{host}/api/rescan"))).await?.json().await?;
+			println!("Found {} models", resp["models"]);
+		}
         Cmd::Status { json } => {
             let resp = get_json(&client, format!("{host}/api/status")).await?;
             if json {
@@ -806,6 +813,11 @@ async fn main() -> Result<()> {
             println!("ML5 {} — {host}", resp["version"].as_str().unwrap_or("?"));
             println!("Uptime: {}s | Installed models: {}", resp["uptime_secs"], resp["model_count"]);
             println!("Model store: {}", resp["models_dir"].as_str().unwrap_or("unknown"));
+			if let Some(dirs) = resp["model_dirs"].as_array() {
+				for dir in dirs.iter().skip(1).filter_map(|dir| dir.as_str()) {
+					println!("Additional model directory: {dir}");
+				}
+			}
             println!(
                 "llama-server: {} (llama.cpp {})",
                 resp["runtime"]["server"].as_str().unwrap_or("not installed yet"),

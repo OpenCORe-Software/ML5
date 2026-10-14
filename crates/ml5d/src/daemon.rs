@@ -155,6 +155,9 @@ fn config_args(config: &Config) -> Vec<OsString> {
         "--max-memory-fraction".into(),
         config.max_memory_fraction.to_string().into(),
     ];
+	for dir in &config.extra_model_dirs {
+		args.extend(["--models-dir".into(), dir.clone().into()]);
+	}
     if m.n_threads > 0 {
         args.extend(["--threads".into(), m.n_threads.to_string().into()]);
     }
