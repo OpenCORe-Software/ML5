@@ -5,6 +5,23 @@ All notable changes to ML5 will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-10-14
+
+### Added
+- `--no-cache-prompt` and `--cache-reuse N` daemon options controlling
+  llama-server's prompt (prefix) caching.
+
+### Fixed
+- The memory budget is a fraction of total RAM+VRAM (previously free memory),
+  so `--max-memory-fraction` means what it says.
+- `ml5` normalizes wildcard hosts (`0.0.0.0`, `[::]`) in `--host`/`ML5_HOST` to
+  loopback, fixing "Cannot reach ML5" on Windows when the daemon binds all
+  interfaces.
+- Windows: llama-server children are assigned to a kill-on-close job object, so
+  they no longer outlive ml5d when it is force-stopped (`ml5d --stop`,
+  taskkill, crash). Model unload on Windows also no longer waits out a 10 s
+  grace period that could never elapse.
+
 ## [0.3.0] - 2026-10-11
 
 ### llama-server engine

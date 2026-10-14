@@ -2067,7 +2067,7 @@ dependencies = [
 
 [[package]]
 name = "ml5"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2086,7 +2086,7 @@ dependencies = [
 
 [[package]]
 name = "ml5-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2115,12 +2115,13 @@ dependencies = [
  "tracing",
  "urlencoding",
  "uuid",
+ "winapi",
  "zip",
 ]
 
 [[package]]
 name = "ml5-installer"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2141,7 +2142,7 @@ dependencies = [
 
 [[package]]
 name = "ml5d"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-stream",

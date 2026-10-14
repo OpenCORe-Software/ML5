@@ -803,11 +803,9 @@ impl Engine {
         let details = info.details.clone().unwrap_or_default();
         let gpu = params.n_gpu_layers.uses_gpu();
         let budget = crate::config::memory_budget(self.config.max_memory_fraction, gpu);
-        let free = budget.known().then(|| {
-            let capacity = (budget.sys_total as f64 * budget.max_fraction as f64) as u64
-                + (budget.gpu_total as f64 * budget.max_fraction as f64) as u64;
-            budget.budget_bytes.min(capacity.saturating_sub(committed))
-        });
+        let free = budget
+            .known()
+            .then(|| budget.budget_bytes.saturating_sub(committed));
 
         let mmproj_bytes = if embeddings {
             0

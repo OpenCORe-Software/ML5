@@ -78,6 +78,12 @@ struct Args {
     #[arg(long, help = "KV cache V type (default f16)")]
     cache_type_v: Option<String>,
 
+    #[arg(long, help = "Disable prompt (prefix) caching in model runtimes")]
+    no_cache_prompt: bool,
+
+    #[arg(long, help = "Min chunk size for KV-shift prefix reuse; 0 disables it (default 0)")]
+    cache_reuse: Option<u32>,
+
     #[arg(long, help = "Keep the KV cache in system RAM instead of VRAM")]
     no_kv_offload: bool,
 
@@ -178,6 +184,12 @@ fn build_config(args: &Args) -> anyhow::Result<Config> {
     }
     if args.no_kv_offload {
         m.offload_kqv = false;
+    }
+    if args.no_cache_prompt {
+        m.cache_prompt = false;
+    }
+    if let Some(v) = args.cache_reuse {
+        m.cache_reuse = v;
     }
     if args.no_mmap {
         m.use_mmap = false;

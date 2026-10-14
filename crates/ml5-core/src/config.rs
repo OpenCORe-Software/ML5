@@ -87,6 +87,8 @@ pub struct ModelParams {
     pub flash_attn: String,
     pub cache_type_k: String,
     pub cache_type_v: String,
+    pub cache_prompt: bool,
+    pub cache_reuse: u32,
     pub offload_kqv: bool,
     pub tensor_split: Option<String>,
     pub rpc_nodes: Option<String>,
@@ -132,6 +134,8 @@ impl ModelParams {
             && self.flash_attn == other.flash_attn
             && self.cache_type_k == other.cache_type_k
             && self.cache_type_v == other.cache_type_v
+            && self.cache_prompt == other.cache_prompt
+            && self.cache_reuse == other.cache_reuse
             && self.offload_kqv == other.offload_kqv
             && self.tensor_split == other.tensor_split
             && self.rpc_nodes == other.rpc_nodes
@@ -153,6 +157,8 @@ impl Default for ModelParams {
             flash_attn: "auto".into(),
             cache_type_k: "f16".into(),
             cache_type_v: "f16".into(),
+            cache_prompt: true,
+            cache_reuse: 0,
             offload_kqv: true,
             tensor_split: None,
             rpc_nodes: None,
@@ -514,13 +520,13 @@ impl MemoryBudget {
 
     pub fn describe_failure(&self, need: u64) -> String {
         format!(
-            "model + context (~{}) would not fit the memory budget ({} = {:.0}% of {} RAM available{}). Use a smaller quantization, a smaller context (--ctx-size), or unload other models.",
+            "model + context (~{}) would not fit the memory budget ({} = {:.0}% of {} total RAM{}). Use a smaller quantization, a smaller context (--ctx-size), or unload other models.",
             humansize(need),
             humansize(self.budget_bytes),
             self.max_fraction * 100.0,
-            humansize(self.sys_avail),
+            humansize(self.sys_total),
             if self.gpu_total > 0 {
-                format!(" + {} free VRAM", humansize(self.gpu_free))
+                format!(" + {} VRAM", humansize(self.gpu_total))
             } else {
                 String::new()
             },
@@ -546,8 +552,8 @@ pub fn memory_budget(max_fraction: f32, gpu_offload: bool) -> MemoryBudget {
     } else {
         GpuMemory::default()
     };
-    let budget = (sys.avail_bytes as f64 * max_fraction as f64) as u64
-        + (gpu.free_bytes as f64 * max_fraction as f64) as u64;
+    let budget = (sys.total_bytes as f64 * max_fraction as f64) as u64
+        + (gpu.total_bytes as f64 * max_fraction as f64) as u64;
     MemoryBudget {
         budget_bytes: budget,
         sys_total: sys.total_bytes,

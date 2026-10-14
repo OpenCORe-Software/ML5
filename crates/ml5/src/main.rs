@@ -262,6 +262,21 @@ fn humansize(b: u64) -> String {
     ml5_core::config::humansize(b)
 }
 
+fn normalize_host(host: &str) -> String {
+    let (prefix, rest) = match host.split_once("://") {
+        Some((scheme, rest)) => (format!("{scheme}://"), rest),
+        None => (String::new(), host),
+    };
+    for (wildcard, loopback) in [("0.0.0.0", "127.0.0.1"), ("[::]", "[::1]")] {
+        if let Some(tail) = rest.strip_prefix(wildcard) {
+            if tail.is_empty() || tail.starts_with(':') || tail.starts_with('/') {
+                return format!("{prefix}{loopback}{tail}");
+            }
+        }
+    }
+    host.to_string()
+}
+
 async fn checked_response(request: reqwest::RequestBuilder) -> Result<reqwest::Response> {
     let response = request.send().await.map_err(|e| {
         if e.is_connect() {
@@ -744,7 +759,7 @@ async fn backend_command(action: BackendAction, quiet: bool) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let host = cli.host.trim_end_matches('/').to_string();
+    let host = normalize_host(cli.host.trim_end_matches('/'));
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .build()?;

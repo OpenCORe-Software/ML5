@@ -173,6 +173,12 @@ fn config_args(config: &Config) -> Vec<OsString> {
     if !m.offload_kqv {
         args.push("--no-kv-offload".into());
     }
+    if !m.cache_prompt {
+        args.push("--no-cache-prompt".into());
+    }
+    if m.cache_reuse > 0 {
+        args.extend(["--cache-reuse".into(), m.cache_reuse.to_string().into()]);
+    }
     if !m.use_mmap {
         args.push("--no-mmap".into());
     }

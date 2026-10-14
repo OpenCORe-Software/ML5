@@ -19,6 +19,8 @@ struct Instance {
     child: Child,
     port: u16,
     log_path: PathBuf,
+    #[cfg(windows)]
+    _job: Option<JobGuard>,
 }
 
 pub struct LlamaServerBackend {
@@ -123,6 +125,12 @@ impl LlamaServerBackend {
         }
         if !p.offload_kqv {
             cmd.arg("--no-kv-offload");
+        }
+        if !p.cache_prompt {
+            cmd.arg("--no-cache-prompt");
+        }
+        if p.cache_reuse > 0 {
+            cmd.arg("--cache-reuse").arg(p.cache_reuse.to_string());
         }
         if p.main_gpu > 0 {
             cmd.arg("--main-gpu").arg(p.main_gpu.to_string());
@@ -283,16 +291,70 @@ fn log_file_name(model: &str) -> String {
 }
 
 #[cfg(unix)]
-fn terminate(child: &Child) {
+fn terminate(child: &Child) -> bool {
     if let Some(pid) = child.id() {
         unsafe {
             libc::kill(pid as libc::pid_t, libc::SIGTERM);
         }
     }
+    true
 }
 
 #[cfg(not(unix))]
-fn terminate(_child: &Child) {}
+fn terminate(_child: &Child) -> bool {
+    false
+}
+
+#[cfg(windows)]
+struct JobGuard(winapi::um::winnt::HANDLE);
+
+#[cfg(windows)]
+impl Drop for JobGuard {
+    fn drop(&mut self) {
+        unsafe {
+            winapi::um::handleapi::CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn job_guard(child: &Child) -> Option<JobGuard> {
+    use winapi::um::jobapi2::{AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject};
+    use winapi::um::winnt::{
+        JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    const WARN: &str = "llama-server is not tied to ml5d's lifetime; it may keep running if ml5d is force-killed";
+    let job = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null()) };
+    if job.is_null() {
+        tracing::warn!("CreateJobObject failed; {WARN}");
+        return None;
+    }
+    let guard = JobGuard(job);
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    let ok = unsafe {
+        SetInformationJobObject(
+            guard.0,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *mut _,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    };
+    if ok == 0 {
+        tracing::warn!("SetInformationJobObject failed; {WARN}");
+        return None;
+    }
+    let Some(handle) = child.raw_handle() else {
+        tracing::warn!("no process handle for llama-server; {WARN}");
+        return None;
+    };
+    if unsafe { AssignProcessToJobObject(guard.0, handle as _) } == 0 {
+        tracing::warn!("AssignProcessToJobObject failed; {WARN}");
+        return None;
+    }
+    Some(guard)
+}
 
 pub struct SseDecoder {
     buf: Vec<u8>,
@@ -539,10 +601,14 @@ impl Backend for LlamaServerBackend {
         let child = cmd
             .spawn()
             .map_err(|e| Ml5Error::Backend(format!("failed to start {}: {e}", server.display())))?;
+        #[cfg(windows)]
+        let job = job_guard(&child);
         *self.instance.lock().await = Some(Instance {
             child,
             port,
             log_path: log_path.clone(),
+            #[cfg(windows)]
+            _job: job,
         });
         if let Err(e) = self.wait_ready(port, &log_path).await {
             self.unload().await.ok();
@@ -562,13 +628,17 @@ impl Backend for LlamaServerBackend {
         let Some(mut inst) = self.instance.lock().await.take() else {
             return Ok(());
         };
-        terminate(&inst.child);
-        match tokio::time::timeout(STOP_GRACE, inst.child.wait()).await {
-            Ok(_) => {}
-            Err(_) => {
-                let _ = inst.child.kill().await;
-                let _ = inst.child.wait().await;
+        if terminate(&inst.child) {
+            match tokio::time::timeout(STOP_GRACE, inst.child.wait()).await {
+                Ok(_) => {}
+                Err(_) => {
+                    let _ = inst.child.kill().await;
+                    let _ = inst.child.wait().await;
+                }
             }
+        } else {
+            let _ = inst.child.kill().await;
+            let _ = inst.child.wait().await;
         }
         tracing::info!(port = inst.port, log = %inst.log_path.display(), "llama-server stopped");
         Ok(())

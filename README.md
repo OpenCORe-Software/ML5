@@ -144,6 +144,8 @@ ml5d --help
 | `--max-memory-fraction` | `0.85` | Share of RAM+VRAM a load may claim |
 | `--flash-attn` | `auto` | `auto`, `on`, `off` |
 | `--cache-type-k/-v` | `f16` | KV cache types (`q8_0` halves KV memory) |
+| `--no-cache-prompt` | off | Disable prefix (prompt) caching in model runtimes |
+| `--cache-reuse N` | `0` | Min chunk size for KV-shift prefix reuse (`0` = off) |
 | `--no-kv-offload` | off | Keep the KV cache in system RAM |
 | `--batch-size`, `--ubatch-size` | `2048`, `512` | Prompt batch sizes |
 | `--threads`, `--threads-batch` | auto | CPU threads |
