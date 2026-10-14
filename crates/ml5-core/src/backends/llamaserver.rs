@@ -320,6 +320,12 @@ fn terminate(_child: &Child) -> bool {
 struct JobGuard(winapi::um::winnt::HANDLE);
 
 #[cfg(windows)]
+unsafe impl Send for JobGuard {}
+
+#[cfg(windows)]
+unsafe impl Sync for JobGuard {}
+
+#[cfg(windows)]
 impl Drop for JobGuard {
     fn drop(&mut self) {
         unsafe {
