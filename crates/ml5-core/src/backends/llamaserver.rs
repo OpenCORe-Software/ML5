@@ -7,6 +7,7 @@ use futures::StreamExt;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
@@ -29,6 +30,7 @@ pub struct LlamaServerBackend {
     server_override: Option<PathBuf>,
     log_dir: PathBuf,
     client: reqwest::Client,
+    opt_cache_prompt: AtomicBool,
 }
 
 impl LlamaServerBackend {
@@ -43,6 +45,7 @@ impl LlamaServerBackend {
                 .pool_idle_timeout(Duration::from_secs(90))
                 .build()
                 .expect("reqwest client"),
+            opt_cache_prompt: AtomicBool::new(false),
         }
     }
 
@@ -126,7 +129,7 @@ impl LlamaServerBackend {
         if !p.offload_kqv {
             cmd.arg("--no-kv-offload");
         }
-        if !p.cache_prompt {
+        if !p.cache_prompt || p.opt_cache_prompt {
             cmd.arg("--no-cache-prompt");
         }
         if p.cache_reuse > 0 {
@@ -236,6 +239,14 @@ impl LlamaServerBackend {
             return Err(runtime_error(status, &text));
         }
         Ok(resp)
+    }
+
+    fn apply_cache_prompt(&self, body: &mut serde_json::Value, requested: Option<bool>) {
+        if self.opt_cache_prompt.load(Ordering::Relaxed) {
+            if let Some(o) = body.as_object_mut() {
+                o.insert("cache_prompt".into(), requested.unwrap_or(false).into());
+            }
+        }
     }
 }
 
@@ -581,6 +592,8 @@ impl Backend for LlamaServerBackend {
 
     async fn load(&self, spec: &LoadSpec) -> Result<()> {
         self.unload().await?;
+        self.opt_cache_prompt
+            .store(spec.params.opt_cache_prompt && spec.params.cache_prompt, Ordering::Relaxed);
         let server = runtime::ensure_runtime(self.server_override.as_deref(), |msg| tracing::info!("{msg}")).await?;
         std::fs::create_dir_all(&self.log_dir)?;
         let log_path = self.log_dir.join(log_file_name(&spec.model.name));
@@ -657,7 +670,8 @@ impl Backend for LlamaServerBackend {
     }
 
     async fn chat(&self, req: ChatRequest) -> Result<TokenStream> {
-        let body = req.to_openai();
+        let mut body = req.to_openai();
+        self.apply_cache_prompt(&mut body, req.cache_prompt);
         let resp = self.post_stream("/v1/chat/completions", &body).await?;
         Ok(openai_stream(resp, true))
     }
@@ -670,8 +684,10 @@ impl Backend for LlamaServerBackend {
         body.insert("stream_options".into(), serde_json::json!({ "include_usage": true }));
         body.insert("return_progress".into(), true.into());
         req.params.apply_openai(&mut body);
+        let mut body = serde_json::Value::Object(body);
+        self.apply_cache_prompt(&mut body, req.cache_prompt);
         let resp = self
-            .post_stream("/v1/completions", &serde_json::Value::Object(body))
+            .post_stream("/v1/completions", &body)
             .await?;
         Ok(openai_stream(resp, false))
     }

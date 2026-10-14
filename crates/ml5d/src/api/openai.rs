@@ -81,6 +81,8 @@ pub struct ChatCompletionsBody {
     pub response_format: Option<Value>,
     #[serde(default)]
     pub keep_alive: Option<Value>,
+    #[serde(default)]
+    pub cache_prompt: Option<bool>,
     #[serde(flatten)]
     pub overrides: RequestOverrides,
 }
@@ -119,6 +121,7 @@ pub async fn chat_completions(
         reasoning_effort: body.reasoning_effort,
         response_format: body.response_format.filter(|f| f["type"].as_str() != Some("text")),
         keep_alive_secs: body.keep_alive.as_ref().and_then(parse_keep_alive),
+        cache_prompt: body.cache_prompt,
     };
 
     let mut stream = state.engine.chat(req).await.map_err(err_response)?;
@@ -255,6 +258,8 @@ pub struct CompletionsBody {
     pub echo: bool,
     #[serde(default)]
     pub keep_alive: Option<Value>,
+    #[serde(default)]
+    pub cache_prompt: Option<bool>,
     #[serde(flatten)]
     pub overrides: RequestOverrides,
 }
@@ -301,6 +306,7 @@ pub async fn completions(
         },
         overrides: body.overrides,
         keep_alive_secs: body.keep_alive.as_ref().and_then(parse_keep_alive),
+        cache_prompt: body.cache_prompt,
     };
 
     let mut stream = state.engine.generate(req).await.map_err(err_response)?;

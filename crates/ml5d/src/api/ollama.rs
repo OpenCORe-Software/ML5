@@ -216,6 +216,7 @@ pub async fn generate(
                 params: opts.to_sampling(),
                 overrides: opts.to_overrides(),
                 keep_alive_secs,
+                cache_prompt: None,
             })
             .await
             .map_err(err_response)?
@@ -433,6 +434,7 @@ pub async fn tags(State(state): State<AppState>) -> impl IntoResponse {
                 "size": m.size_bytes,
                 "digest": digest_of(m),
                 "details": details_of(m),
+                "capabilities": ollama_caps(m),
             })
         })
         .collect();

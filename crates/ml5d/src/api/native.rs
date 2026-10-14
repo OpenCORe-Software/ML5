@@ -48,6 +48,8 @@ pub struct ChatBody {
     pub response_format: Option<Value>,
     #[serde(default)]
     pub keep_alive: Option<Value>,
+    #[serde(default)]
+    pub cache_prompt: Option<bool>,
     #[serde(flatten)]
     pub overrides: RequestOverrides,
     #[serde(default = "default_true")]
@@ -130,6 +132,7 @@ pub async fn chat(
         reasoning_effort: body.reasoning_effort,
         response_format,
         keep_alive_secs: body.keep_alive.as_ref().and_then(parse_keep_alive),
+        cache_prompt: body.cache_prompt,
     };
     native_response(state.engine, body.model, body.stream, Work::Chat(req)).await
 }
@@ -228,6 +231,8 @@ pub struct GenerateBody {
     pub sampling: SamplingFields,
     #[serde(default)]
     pub keep_alive: Option<Value>,
+    #[serde(default)]
+    pub cache_prompt: Option<bool>,
     #[serde(flatten)]
     pub overrides: RequestOverrides,
     #[serde(default = "default_true")]
@@ -245,6 +250,7 @@ pub async fn generate(
         params: body.sampling.into_params(),
         overrides: body.overrides,
         keep_alive_secs: body.keep_alive.as_ref().and_then(parse_keep_alive),
+        cache_prompt: body.cache_prompt,
     };
     native_response(state.engine, body.model, body.stream, Work::Generate(req)).await
 }

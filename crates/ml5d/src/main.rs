@@ -81,6 +81,9 @@ struct Args {
     #[arg(long, help = "Disable prompt (prefix) caching in model runtimes")]
     no_cache_prompt: bool,
 
+    #[arg(long, conflicts_with = "no_cache_prompt", help = "Cache prompts only when a request opts in with cache_prompt=true")]
+    opt_cache_prompt: bool,
+
     #[arg(long, help = "Min chunk size for KV-shift prefix reuse; 0 disables it (default 0)")]
     cache_reuse: Option<u32>,
 
@@ -187,6 +190,9 @@ fn build_config(args: &Args) -> anyhow::Result<Config> {
     }
     if args.no_cache_prompt {
         m.cache_prompt = false;
+    }
+    if args.opt_cache_prompt {
+        m.opt_cache_prompt = true;
     }
     if let Some(v) = args.cache_reuse {
         m.cache_reuse = v;

@@ -176,6 +176,9 @@ fn config_args(config: &Config) -> Vec<OsString> {
     if !m.cache_prompt {
         args.push("--no-cache-prompt".into());
     }
+    if m.opt_cache_prompt {
+        args.push("--opt-cache-prompt".into());
+    }
     if m.cache_reuse > 0 {
         args.extend(["--cache-reuse".into(), m.cache_reuse.to_string().into()]);
     }

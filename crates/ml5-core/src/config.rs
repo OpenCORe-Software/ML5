@@ -89,6 +89,7 @@ pub struct ModelParams {
     pub cache_type_v: String,
     pub cache_prompt: bool,
     pub cache_reuse: u32,
+    pub opt_cache_prompt: bool,
     pub offload_kqv: bool,
     pub tensor_split: Option<String>,
     pub rpc_nodes: Option<String>,
@@ -136,6 +137,7 @@ impl ModelParams {
             && self.cache_type_v == other.cache_type_v
             && self.cache_prompt == other.cache_prompt
             && self.cache_reuse == other.cache_reuse
+            && self.opt_cache_prompt == other.opt_cache_prompt
             && self.offload_kqv == other.offload_kqv
             && self.tensor_split == other.tensor_split
             && self.rpc_nodes == other.rpc_nodes
@@ -159,6 +161,7 @@ impl Default for ModelParams {
             cache_type_v: "f16".into(),
             cache_prompt: true,
             cache_reuse: 0,
+            opt_cache_prompt: false,
             offload_kqv: true,
             tensor_split: None,
             rpc_nodes: None,

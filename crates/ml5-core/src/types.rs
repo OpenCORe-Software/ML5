@@ -303,6 +303,7 @@ pub struct ChatRequest {
     pub reasoning_effort: Option<String>,
     pub response_format: Option<serde_json::Value>,
     pub keep_alive_secs: Option<i64>,
+    pub cache_prompt: Option<bool>,
 }
 
 impl ChatRequest {
@@ -365,6 +366,7 @@ pub struct GenerateRequest {
     pub params: SamplingParams,
     pub overrides: RequestOverrides,
     pub keep_alive_secs: Option<i64>,
+    pub cache_prompt: Option<bool>,
 }
 
 #[derive(Debug, Clone)]

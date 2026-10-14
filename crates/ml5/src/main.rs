@@ -60,6 +60,9 @@ struct ChatOpts {
 
     #[arg(long, help = "How long the model stays loaded afterwards (e.g. 5m, 1h, -1 = forever)")]
     keep_alive: Option<String>,
+
+    #[arg(long, help = "Opt in to prompt caching (only with ml5d --opt-cache-prompt)")]
+    cache_prompt: bool,
 }
 
 impl ChatOpts {
@@ -83,6 +86,7 @@ impl ChatOpts {
         set("max_tokens", serde_json::json!(self.max_tokens));
         set("think", serde_json::json!(self.think.as_deref().map(|t| t == "on")));
         set("keep_alive", serde_json::json!(self.keep_alive));
+        set("cache_prompt", serde_json::json!(self.cache_prompt.then_some(true)));
         o
     }
 }

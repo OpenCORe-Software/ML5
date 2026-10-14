@@ -145,6 +145,7 @@ ml5d --help
 | `--flash-attn` | `auto` | `auto`, `on`, `off` |
 | `--cache-type-k/-v` | `f16` | KV cache types (`q8_0` halves KV memory) |
 | `--no-cache-prompt` | off | Disable prefix (prompt) caching in model runtimes |
+| `--opt-cache-prompt` | off | Cache prompts only when a request sets `cache_prompt: true` |
 | `--cache-reuse N` | `0` | Min chunk size for KV-shift prefix reuse (`0` = off) |
 | `--no-kv-offload` | off | Keep the KV cache in system RAM |
 | `--batch-size`, `--ubatch-size` | `2048`, `512` | Prompt batch sizes |
@@ -156,7 +157,9 @@ ml5d --help
 
 Requests may override `n_ctx`, `n_gpu_layers`, `flash_attn`, `cache_type_k`,
 `cache_type_v`, and `keep_alive`; a model reloads only when a load-affecting value
-changes.
+changes. With `--opt-cache-prompt`, requests on the native and OpenAI
+chat/completions endpoints opt in to prompt caching with `cache_prompt: true`
+(CLI: `--cache-prompt`).
 
 ## API
 
