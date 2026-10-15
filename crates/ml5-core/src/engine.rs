@@ -959,15 +959,17 @@ impl Engine {
         }
 
         // Warn when model is large relative to VRAM (heuristic: > 2x VRAM)
-        if params.n_gpu_layers.uses_gpu() && budget.gpu_total > 0 && !params.offload_warn_off {
-            if weights > budget.gpu_total * 2 {
-                tracing::warn!(
-                    model = %info.name,
-                    model_size = %crate::config::humansize(weights),
-                    vram = %crate::config::humansize(budget.gpu_total),
-                    "model is much larger than VRAM; GPU offload may be slow (use --bench-first to auto-detect, or --offload-warn-off to suppress)"
-                );
-            }
+        if params.n_gpu_layers.uses_gpu()
+            && budget.gpu_total > 0
+            && !params.offload_warn_off
+            && weights > budget.gpu_total * 2
+        {
+            tracing::warn!(
+                model = %info.name,
+                model_size = %crate::config::humansize(weights),
+                vram = %crate::config::humansize(budget.gpu_total),
+                "model is much larger than VRAM; GPU offload may be slow (use --bench-first to auto-detect, or --offload-warn-off to suppress)"
+            );
         }
 
         Ok((
