@@ -117,6 +117,12 @@ struct Args {
 
     #[arg(long, help = "Max fraction of RAM+VRAM a load may claim (default 0.85)")]
     max_memory_fraction: Option<f32>,
+
+    #[arg(long, help = "Benchmark GPU vs CPU on first model load and cache the faster choice")]
+    bench_first: bool,
+
+    #[arg(long, help = "Suppress warnings when GPU offload may be suboptimal")]
+    offload_warn_off: bool,
 }
 
 fn parse_duration(raw: &str) -> anyhow::Result<i64> {
@@ -219,6 +225,12 @@ fn build_config(args: &Args) -> anyhow::Result<Config> {
     }
     if let Some(v) = args.auto_ctx_max {
         config.auto_ctx_max = v;
+    }
+    if args.bench_first {
+        m.bench_first = true;
+    }
+    if args.offload_warn_off {
+        m.offload_warn_off = true;
     }
     config.llama_server = args.llama_server.clone();
     config.validate()?;

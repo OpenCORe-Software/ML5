@@ -4,6 +4,7 @@ use crate::error::{Ml5Error, Result};
 use crate::gguf::{self, GgufInfo};
 use crate::model::{self, ModelDetails, ModelInfo, ModelMeta, ModelType};
 use crate::pull::PullEvent;
+use crate::runtime;
 use crate::types::*;
 use futures::StreamExt;
 use serde::Serialize;
@@ -783,25 +784,56 @@ impl Engine {
         };
 
         let (spec, need) = spec;
+
+        // Benchmark GPU vs CPU if requested and GPU offload is enabled
+        let mut final_spec = spec;
+        if final_spec.params.bench_first && final_spec.params.n_gpu_layers.uses_gpu() {
+            let bench_result = self.benchmark_backends(info, &final_spec.params, embeddings).await;
+            match bench_result {
+                Ok((gpu_tps, cpu_tps)) => {
+                    let use_gpu = gpu_tps > cpu_tps;
+                    if !use_gpu {
+                        tracing::info!(
+                            model = %info.name,
+                            gpu_tps,
+                            cpu_tps,
+                            "benchmark: CPU is faster, disabling GPU offload"
+                        );
+                        final_spec.params.n_gpu_layers = crate::config::GpuLayers::Count(0);
+                    } else {
+                        tracing::info!(
+                            model = %info.name,
+                            gpu_tps,
+                            cpu_tps,
+                            "benchmark: GPU is faster, keeping offload"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(model = %info.name, error = %e, "benchmark failed, using default GPU setting");
+                }
+            }
+        }
+
         let backend = self.make_backend(info);
         self.loading.write().await.insert(info.name.clone());
         tracing::info!(
             model = %info.name,
-            ctx = spec.params.n_ctx,
-            parallel = spec.n_parallel,
+            ctx = final_spec.params.n_ctx,
+            parallel = final_spec.n_parallel,
             embeddings,
-            gpu_layers = %spec.params.n_gpu_layers,
+            gpu_layers = %final_spec.params.n_gpu_layers,
             "loading model"
         );
-        let result = backend.load(&spec).await;
+        let result = backend.load(&final_spec).await;
         self.loading.write().await.remove(&info.name);
         result?;
 
         let entry = Arc::new(LoadedModel {
             info: info.clone(),
             backend,
-            params: spec.params.clone(),
-            n_parallel: spec.n_parallel,
+            params: final_spec.params.clone(),
+            n_parallel: final_spec.n_parallel,
             embeddings,
             need_bytes: need,
             loaded_at: chrono::Utc::now(),
@@ -890,11 +922,21 @@ impl Engine {
             params.n_ctx = if embeddings || info.model_type == ModelType::Safetensors {
                 upper
             } else if let (Some(free), true) = (free, kv_per_token > 0) {
-                let room = free.saturating_sub(weights + overhead);
-                let per_slot = room / (kv_per_token * n_parallel as u64);
+                // When GPU layers are offloaded, the KV cache lives in VRAM.
+                // Use GPU free memory for KV sizing; weights are also on GPU.
+                let (kv_room, room_desc) = if gpu && budget.gpu_free > 0 {
+                    let vram_available = (budget.gpu_free as f64 * self.config.max_memory_fraction as f64) as u64;
+                    let vram_room = vram_available.saturating_sub(weights + overhead);
+                    (vram_room, "VRAM")
+                } else {
+                    (free.saturating_sub(weights + overhead), "RAM")
+                };
+                let per_slot = kv_room / (kv_per_token * n_parallel as u64);
                 let lower = AUTO_CTX_MIN.min(upper);
                 let fitted = (per_slot.min(u32::MAX as u64) as u32) / 1024 * 1024;
-                fitted.clamp(lower, upper)
+                let fitted = fitted.clamp(lower, upper);
+                tracing::debug!(model = %info.name, room = %crate::config::humansize(kv_room), room_desc, fitted_ctx = fitted, "auto context");
+                fitted
             } else if kv_per_token == 0 {
                 upper
             } else {
@@ -916,6 +958,18 @@ impl Engine {
             }
         }
 
+        // Warn when model is large relative to VRAM (heuristic: > 2x VRAM)
+        if params.n_gpu_layers.uses_gpu() && budget.gpu_total > 0 && !params.offload_warn_off {
+            if weights > budget.gpu_total * 2 {
+                tracing::warn!(
+                    model = %info.name,
+                    model_size = %crate::config::humansize(weights),
+                    vram = %crate::config::humansize(budget.gpu_total),
+                    "model is much larger than VRAM; GPU offload may be slow (use --bench-first to auto-detect, or --offload-warn-off to suppress)"
+                );
+            }
+        }
+
         Ok((
             LoadSpec {
                 model: info.clone(),
@@ -925,6 +979,128 @@ impl Engine {
             },
             need,
         ))
+    }
+
+    /// Benchmark GPU vs CPU token generation speed for a model.
+    /// Returns (gpu_tps, cpu_tps) or an error if benchmarking fails.
+    /// Results are cached in ~/.ml5/bench-cache.json to avoid re-benchmarking.
+    async fn benchmark_backends(
+        &self,
+        info: &ModelInfo,
+        _params: &ModelParams,
+        embeddings: bool,
+    ) -> Result<(f64, f64)> {
+        // Skip benchmarking for non-GGUF models or when GPU isn't available
+        if info.model_type != ModelType::Gguf || embeddings {
+            return Err(Ml5Error::Backend("benchmarking not supported for this model type".into()));
+        }
+
+        let cache_path = Config::ml5_home().join("bench-cache.json");
+        let cache_key = format!("{}:{}", info.name, info.path.metadata()?.len());
+
+        // Check cache
+        if let Ok(cache_str) = std::fs::read_to_string(&cache_path) {
+            if let Ok(cache) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&cache_str) {
+                if let Some(entry) = cache.get(&cache_key) {
+                    let gpu_tps = entry["gpu_tps"].as_f64().unwrap_or(0.0);
+                    let cpu_tps = entry["cpu_tps"].as_f64().unwrap_or(0.0);
+                    if gpu_tps > 0.0 && cpu_tps > 0.0 {
+                        tracing::info!(model = %info.name, gpu_tps, cpu_tps, "benchmark: using cached result");
+                        return Ok((gpu_tps, cpu_tps));
+                    }
+                }
+            }
+        }
+
+        let server = runtime::ensure_runtime(self.config.llama_server.as_deref(), |msg| tracing::info!("{msg}")).await?;
+        let log_dir = self.config.log_dir();
+        std::fs::create_dir_all(&log_dir).ok();
+
+        let mut results = Vec::new();
+
+        for (name, gpu_layers) in [("gpu", "999"), ("cpu", "0")] {
+            let log_path = log_dir.join(format!("bench-{}-{}.log", info.name, name));
+            let mut cmd = std::process::Command::new(&server);
+            cmd.arg("--model")
+                .arg(&info.path)
+                .arg("--ctx-size")
+                .arg("2048")
+                .arg("--n-gpu-layers")
+                .arg(gpu_layers)
+                .arg("--batch-size")
+                .arg("512")
+                .arg("--threads")
+                .arg("6")
+                .arg("--no-webui")
+                .arg("--log-colors")
+                .arg("off")
+                .arg("--port")
+                .arg("0") // random port
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::from(std::fs::File::create(&log_path)?));
+
+            let mut child = cmd.spawn().map_err(|e| Ml5Error::Backend(format!("failed to spawn benchmark: {e}")))?;
+
+            // Wait for server to start
+            let start = std::time::Instant::now();
+            let mut port = None;
+            while start.elapsed() < std::time::Duration::from_secs(30) {
+                if let Ok(log) = std::fs::read_to_string(&log_path) {
+                    if let Some(line) = log.lines().find(|l| l.contains("listening on")) {
+                        if let Some(p) = line.rsplit(':').next().and_then(|s| s.parse::<u16>().ok()) {
+                            port = Some(p);
+                            break;
+                        }
+                    }
+                }
+                if child.try_wait()?.is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+
+            let port = port.ok_or_else(|| Ml5Error::Backend("benchmark server failed to start".into()))?;
+
+            // Run a quick generation benchmark
+            let client = reqwest::Client::new();
+            let resp = client
+                .post(format!("http://127.0.0.1:{}/completion", port))
+                .json(&serde_json::json!({
+                    "prompt": "The quick brown fox",
+                    "n_predict": 32,
+                    "temperature": 0.7,
+                }))
+                .send()
+                .await
+                .map_err(|e| Ml5Error::Backend(format!("benchmark request failed: {e}")))?;
+
+            let body: serde_json::Value = resp.json().await.map_err(|e| Ml5Error::Backend(format!("benchmark parse failed: {e}")))?;
+            let tps = body["timings"]["predicted_per_second"]
+                .as_f64()
+                .ok_or_else(|| Ml5Error::Backend("benchmark missing timing data".into()))?;
+
+            results.push(tps);
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+
+        let gpu_tps = results[0];
+        let cpu_tps = results[1];
+
+        // Save to cache
+        let mut cache = if let Ok(cache_str) = std::fs::read_to_string(&cache_path) {
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&cache_str).unwrap_or_default()
+        } else {
+            serde_json::Map::new()
+        };
+        cache.insert(cache_key, serde_json::json!({
+            "gpu_tps": gpu_tps,
+            "cpu_tps": cpu_tps,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        }));
+        let _ = std::fs::write(&cache_path, serde_json::to_string_pretty(&cache)?);
+
+        Ok((gpu_tps, cpu_tps))
     }
 
     async fn reap(&self) {

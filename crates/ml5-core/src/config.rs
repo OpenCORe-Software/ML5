@@ -93,6 +93,10 @@ pub struct ModelParams {
     pub offload_kqv: bool,
     pub tensor_split: Option<String>,
     pub rpc_nodes: Option<String>,
+    /// Benchmark GPU vs CPU on first load and cache the faster backend choice.
+    pub bench_first: bool,
+    /// Suppress warnings when GPU offload may be suboptimal.
+    pub offload_warn_off: bool,
 }
 
 impl ModelParams {
@@ -141,6 +145,8 @@ impl ModelParams {
             && self.offload_kqv == other.offload_kqv
             && self.tensor_split == other.tensor_split
             && self.rpc_nodes == other.rpc_nodes
+            && self.bench_first == other.bench_first
+            && self.offload_warn_off == other.offload_warn_off
     }
 }
 
@@ -165,6 +171,8 @@ impl Default for ModelParams {
             offload_kqv: true,
             tensor_split: None,
             rpc_nodes: None,
+            bench_first: false,
+            offload_warn_off: false,
         }
     }
 }
