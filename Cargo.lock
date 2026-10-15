@@ -2067,7 +2067,7 @@ dependencies = [
 
 [[package]]
 name = "ml5"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2086,7 +2086,7 @@ dependencies = [
 
 [[package]]
 name = "ml5-core"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2121,7 +2121,7 @@ dependencies = [
 
 [[package]]
 name = "ml5-installer"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -2142,7 +2142,7 @@ dependencies = [
 
 [[package]]
 name = "ml5d"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "async-stream",

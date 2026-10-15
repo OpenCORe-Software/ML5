@@ -5,6 +5,21 @@ All notable changes to ML5 will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] - 2026-10-14
+
+### Added
+- `--bench-first`: benchmark GPU vs CPU token generation on first model load,
+  cache the result in `~/.ml5/bench-cache.json`, and auto-select the faster
+  backend for subsequent loads. Cache key is model name + file size.
+- `--offload-warn-off`: suppress the warning when model size exceeds 2x VRAM.
+- VRAM-aware context sizing: when GPU layers are offloaded, the auto context
+  calculation now uses available VRAM instead of combined RAM+VRAM budget.
+
+### Fixed
+- `--n-gpu-layers auto` now works correctly with llama.cpp's `--fit on` by
+  passing `999` as the layer count instead of `auto`, which was treated as a
+  fixed user value and caused the fit logic to abort.
+
 ## [0.3.3] - 2026-10-14
 
 ### Added
