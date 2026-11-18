@@ -424,6 +424,11 @@ impl Engine {
 		}
         match info.model_type {
             ModelType::Safetensors => tokio::fs::remove_dir_all(&info.path).await?,
+            ModelType::External => match tokio::fs::remove_file(&info.path).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            },
             ModelType::Gguf => {
                 let files = if info.files.is_empty() {
                     vec![info.path.clone()]
@@ -771,6 +776,12 @@ impl Engine {
             }
         }
 
+        if info.model_type == ModelType::External
+            && crate::formats::for_path(&info.path).is_some_and(|f| f.exclusive_gpu())
+        {
+            self.evict_other_exclusive(&info.name).await?;
+        }
+
         let spec = loop {
             let committed: u64 = self.loaded.read().await.values().map(|m| m.need_bytes).sum();
             match self.plan_load(info, &wanted, embeddings, n_parallel, committed) {
@@ -850,6 +861,34 @@ impl Engine {
         Ok(guard)
     }
 
+    /// Formats that need the GPU to themselves (see `ModelFormat::exclusive_gpu`): unload every other
+    /// loaded model of such a format before loading one, rather than let a GPU driver fail mid-load.
+    async fn evict_other_exclusive(&self, keep: &str) -> Result<()> {
+        let victims = {
+            let mut loaded = self.loaded.write().await;
+            let names: Vec<String> = loaded
+                .iter()
+                .filter(|(n, m)| {
+                    n.as_str() != keep
+                        && m.info.model_type == ModelType::External
+                        && crate::formats::for_path(&m.info.path).is_some_and(|f| f.exclusive_gpu())
+                })
+                .map(|(n, _)| n.clone())
+                .collect();
+            if let Some(busy) = names.iter().find(|n| loaded[*n].active_requests() > 0) {
+                return Err(Ml5Error::InvalidRequest(format!(
+                    "model '{busy}' is serving requests on the GPU; retry when it finishes."
+                )));
+            }
+            names.iter().filter_map(|n| loaded.remove(n)).collect::<Vec<_>>()
+        };
+        for m in victims {
+            tracing::info!(model = %m.info.name, "unloading model to free the GPU");
+            m.backend.unload().await.ok();
+        }
+        Ok(())
+    }
+
     async fn evict_one(&self, keep: &str) -> bool {
         let victim = {
             let mut loaded = self.loaded.write().await;
@@ -877,6 +916,11 @@ impl Engine {
                 self.config.log_dir(),
             )),
             ModelType::Safetensors => Arc::new(crate::backends::candle::CandleBackend::new()),
+            // listed only via a registered format, so it is found; if not, the candle backend refuses the load
+            ModelType::External => match crate::formats::for_path(&info.path) {
+                Some(f) => f.backend(),
+                None => Arc::new(crate::backends::candle::CandleBackend::new()),
+            },
         }
     }
 
@@ -919,7 +963,14 @@ impl Engine {
         let upper = trained.min(self.config.auto_ctx_max).max(256);
 
         if params.n_ctx == 0 {
-            params.n_ctx = if embeddings || info.model_type == ModelType::Safetensors {
+            let cap = if info.model_type == ModelType::External {
+                crate::formats::for_path(&info.path).and_then(|f| f.context_cap())
+            } else {
+                None
+            };
+            params.n_ctx = if let Some(cap) = cap {
+                upper.min(cap)
+            } else if embeddings || info.model_type == ModelType::Safetensors {
                 upper
             } else if let (Some(free), true) = (free, kv_per_token > 0) {
                 // When GPU layers are offloaded, the KV cache lives in VRAM.
@@ -1187,6 +1238,10 @@ fn scan_store(
         if path.is_file() {
             if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
                 root_ggufs.push(path);
+            } else if let Some(f) = crate::formats::for_path(&path) {
+                if let Some(info) = f.describe(&path, None) {
+                    models.insert(info.name.clone(), info);
+                }
             }
             continue;
         }
@@ -1215,6 +1270,11 @@ fn scan_store(
             }
             continue;
         }
+        for p in children.iter().filter(|p| p.is_file()) {
+            if let Some(info) = crate::formats::for_path(p).and_then(|f| f.describe(p, Some(&dir_name))) {
+                models.insert(info.name.clone(), info);
+            }
+        }
         let ggufs: Vec<PathBuf> = children
             .into_iter()
             .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("gguf"))
@@ -1230,6 +1290,7 @@ fn scan_store(
     }
     Ok((models, cache))
 }
+
 
 fn safetensors_model(path: &Path, name: &str, children: &[PathBuf]) -> Option<ModelInfo> {
     let meta_path = path.join("model.meta.json");

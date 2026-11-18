@@ -392,7 +392,11 @@ fn details_of(m: &ModelInfo) -> Value {
     let d = m.details.clone().unwrap_or_default();
     json!({
         "parent_model": "",
-        "format": match m.model_type { ModelType::Gguf => "gguf", ModelType::Safetensors => "safetensors" },
+        "format": match m.model_type {
+            ModelType::Gguf => "gguf",
+            ModelType::Safetensors => "safetensors",
+            ModelType::External => ml5_core::formats::for_path(&m.path).map_or("external", |f| f.name()),
+        },
         "family": d.architecture,
         "families": if d.architecture.is_empty() { Value::Null } else { json!([d.architecture]) },
         "parameter_size": d.parameter_size,

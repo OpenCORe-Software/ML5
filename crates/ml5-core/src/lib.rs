@@ -3,6 +3,7 @@ pub mod backends;
 pub mod config;
 pub mod engine;
 pub mod error;
+pub mod formats;
 pub mod gguf;
 pub mod model;
 pub mod pull;

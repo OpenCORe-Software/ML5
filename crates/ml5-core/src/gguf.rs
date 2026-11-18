@@ -184,7 +184,15 @@ fn wanted(key: &str) -> bool {
 }
 
 pub fn read_info(path: &Path) -> Result<GgufInfo> {
-    let file = std::fs::File::open(path)?;
+    read_info_at(path, 0)
+}
+
+/// Read GGUF metadata from a GGUF stored at byte `offset` of `path` (e.g. inside a container file).
+pub fn read_info_at(path: &Path, offset: u64) -> Result<GgufInfo> {
+    let mut file = std::fs::File::open(path)?;
+    if offset > 0 {
+        file.seek(std::io::SeekFrom::Start(offset))?;
+    }
     let mut r = Reader {
         inner: BufReader::with_capacity(256 * 1024, file),
     };

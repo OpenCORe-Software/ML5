@@ -52,6 +52,8 @@ pub enum ModelType {
     #[default]
     Gguf,
     Safetensors,
+    /// A format registered at startup (see `formats`); the format is looked up from the path.
+    External,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
